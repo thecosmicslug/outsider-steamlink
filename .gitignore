@@ -10,6 +10,9 @@ Testing/
 *.rmmzsave
 *.jsc
 
+# The game itself
+game/
+
 # Distribution output from tools/build_game.py
 dist/
 
