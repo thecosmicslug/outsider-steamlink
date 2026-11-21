@@ -13,14 +13,14 @@
 /* Global renderer, defined in bind_renderer.c; drawTiles uses its sprite batch. */
 extern Renderer *s_renderer;
 
-/* drawTiles(elementsF32, count, textureIds, texWidths, texHeights, numTilesets, offsetX, offsetY) */
+/* drawTiles(elementsF32, count, textureIds, texWidths, texHeights, numTilesets, offsetX, offsetY, cacheToken) */
 
 static JSValue js_tilemap_draw_tiles(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
 {
     (void)this_val;
-    if (argc < 8)
-        return JS_ThrowTypeError(ctx, "drawTiles requires 8 arguments");
+    if (argc < 9)
+        return JS_ThrowTypeError(ctx, "drawTiles requires 9 arguments");
     if (!s_renderer)
         return JS_UNDEFINED;
 
@@ -35,7 +35,7 @@ static JSValue js_tilemap_draw_tiles(JSContext *ctx, JSValueConst this_val,
     /* arg 5: numTilesets */
     int num_tilesets;
     if (JS_ToInt32(ctx, &num_tilesets, argv[5])) return JS_EXCEPTION;
-    if (num_tilesets <= 0) return JS_UNDEFINED;
+    if (num_tilesets < 0) return JS_UNDEFINED;
 
     /* Allocate tilesets info on the stack for small counts, heap for large. */
     TilesetInfo stack_ts[32];
@@ -78,6 +78,11 @@ static JSValue js_tilemap_draw_tiles(JSContext *ctx, JSValueConst this_val,
         if (tilesets != stack_ts) free(tilesets);
         return JS_EXCEPTION;
     }
+    int cache_token;
+    if (JS_ToInt32(ctx, &cache_token, argv[8])) {
+        if (tilesets != stack_ts) free(tilesets);
+        return JS_EXCEPTION;
+    }
 
     /* arg 0: elementsF32 (ArrayBuffer). Capture the backing pointer only after
        every other argument is converted: those conversions can run user JS
@@ -96,19 +101,35 @@ static JSValue js_tilemap_draw_tiles(JSContext *ctx, JSValueConst this_val,
     const float *elements = (const float *)elem_buf;
 
     SpriteBatch *batch = renderer_get_batch(s_renderer);
+    int visible = 0;
+    int draw_calls = 0;
     if (batch) {
-        tilemap_draw_tiles(elements, count, tilesets, num_tilesets,
-                           (float)offset_x, (float)offset_y, batch);
+        int draw_calls_before = sprite_batch_get_draw_calls(batch);
+        int width = 0, height = 0;
+        renderer_get_size(s_renderer, &width, &height);
+        visible = tilemap_draw_tiles_viewport(
+            elements, count, tilesets, num_tilesets,
+            (float)offset_x, (float)offset_y,
+            (float)width, (float)height, (uint32_t)cache_token, batch);
+        draw_calls = sprite_batch_get_draw_calls(batch) - draw_calls_before;
     }
 
     if (tilesets != stack_ts) free(tilesets);
-    return JS_UNDEFINED;
+
+    JSValue result = JS_NewObject(ctx);
+    if (JS_IsException(result)) return result;
+    if (JS_SetPropertyStr(ctx, result, "visible", JS_NewInt32(ctx, visible)) < 0 ||
+        JS_SetPropertyStr(ctx, result, "drawCalls", JS_NewInt32(ctx, draw_calls)) < 0) {
+        JS_FreeValue(ctx, result);
+        return JS_EXCEPTION;
+    }
+    return result;
 }
 
 /* Registration */
 
 static const JSCFunctionListEntry js_tilemap_funcs[] = {
-    JS_CFUNC_DEF("drawTiles", 8, js_tilemap_draw_tiles),
+    JS_CFUNC_DEF("drawTiles", 9, js_tilemap_draw_tiles),
 };
 
 void bind_tilemap_register(JSContext *ctx)

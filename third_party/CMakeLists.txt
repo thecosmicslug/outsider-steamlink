@@ -1,26 +1,37 @@
 include(FetchContent)
 
-# SDL3 — window, input, audio device and the GPU rendering backend.
-FetchContent_Declare(
-    SDL3
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG        release-3.4.16
-    GIT_SHALLOW    TRUE
-)
-if(ANDROID)
-    # SDLActivity loads libSDL3.so through JNI, so SDL must be shared there.
-    set(SDL_SHARED ON CACHE BOOL "" FORCE)
-    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+# SDL3 is fetched for desktop/Android; Steam Link uses the SDL2 installed
+# in its sysroot.
+if(RMMZ_STEAMLINK)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+    set(RMMZ_SDL_TARGET PkgConfig::SDL2)
 else()
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG        release-3.4.16
+        GIT_SHALLOW    TRUE
+    )
+    if(ANDROID)
+        # SDLActivity loads libSDL3.so through JNI, so SDL must be shared there.
+        set(SDL_SHARED ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    else()
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    endif()
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+    # XTest only synthesises input for SDL's own tests; SDL treats its absence as
+    # a fatal configure error, so a Linux box without libxtst-dev could not build.
+    set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(SDL3)
+    set(RMMZ_SDL_TARGET SDL3::SDL3)
 endif()
-set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
-# XTest only synthesises input for SDL's own tests; SDL treats its absence as
-# a fatal configure error, so a Linux box without libxtst-dev could not build.
-set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(SDL3)
+
+add_library(rmmz_sdl INTERFACE)
+target_link_libraries(rmmz_sdl INTERFACE ${RMMZ_SDL_TARGET})
 
 # QuickJS-NG
 FetchContent_Declare(
@@ -72,9 +83,9 @@ add_library(soloud STATIC
     ${SOLOUD_SRC}/audiosource/wav/soloud_wavstream.cpp
     ${SOLOUD_SRC}/audiosource/wav/stb_vorbis.c
     ${SOLOUD_SRC}/audiosource/wav/dr_impl.cpp
-    # Backend — SDL3. SoLoud ships no SDL3 backend, so ours stands in for the
-    # sdl2_static one it does ship: same entry point, so Soloud::AUTO finds it.
-    ${CMAKE_SOURCE_DIR}/src/audio/soloud_sdl3_backend.cpp
+    # Backend — SDL3 on desktop, SDL2 on Steam Link.
+    $<$<BOOL:${RMMZ_STEAMLINK}>:${CMAKE_SOURCE_DIR}/src/audio/soloud_sdl2_backend.cpp>
+    $<$<NOT:$<BOOL:${RMMZ_STEAMLINK}>>:${CMAKE_SOURCE_DIR}/src/audio/soloud_sdl3_backend.cpp>
     # Backend — null (for headless testing)
     ${SOLOUD_SRC}/backend/null/soloud_null.cpp
 )
@@ -85,7 +96,7 @@ target_compile_definitions(soloud PRIVATE WITH_SDL2_STATIC WITH_NULL
     # soloud_thread.cpp tries to include pthread.h.
     $<$<BOOL:${WIN32}>:WINDOWS_VERSION>
 )
-target_link_libraries(soloud PRIVATE SDL3::SDL3)
+target_link_libraries(soloud PRIVATE rmmz_sdl)
 set_target_properties(soloud PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Runtime shader compilation — lets the GPU backend build shaders a game's
@@ -166,7 +177,7 @@ if(RMMZ_RUNTIME_SHADERS)
     # path. DXBC is compiled separately through Windows' own d3dcompiler_47,
     # and SDL's D3D12 backend accepts DXBC, so nothing here ships a
     # redistributable compiler.
-    target_link_libraries(sdl_shadercross PUBLIC SDL3::SDL3 spirv-cross-c)
+    target_link_libraries(sdl_shadercross PUBLIC rmmz_sdl spirv-cross-c)
     set_target_properties(sdl_shadercross PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 

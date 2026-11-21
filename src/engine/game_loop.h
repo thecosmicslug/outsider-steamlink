@@ -9,6 +9,9 @@
 #include "engine/js_engine.h"
 #include "platform/platform.h"
 #include <stdbool.h>
+#ifdef RMMZ_STEAMLINK
+#include "rendering/sprite_batch.h"
+#endif
 
 typedef struct GameLoop GameLoop;
 
@@ -18,7 +21,15 @@ typedef struct {
     double timers_ms;    /* JS timer queue flush */
     double jobs_ms;      /* Promise/microtask execution */
     double raf_ms;       /* requestAnimationFrame callbacks (includes rendering) */
-    double swap_ms;      /* Buffer swap */
+    double present_ms;   /* Render the final frame to the window */
+#ifdef RMMZ_STEAMLINK
+    SpriteBatchProfileStats sprite_gpu_profile;
+    double filter_gpu_wait_ms;  /* GPU completion for filter quad draws */
+    int    filter_draw_count;   /* Filter quad draws measured */
+    double scene_gpu_wait_ms;   /* GPU completion after scene rendering */
+    double present_gpu_wait_ms; /* GPU completion after final blit */
+#endif
+    double swap_ms;      /* Window buffer swap */
     double total_ms;     /* Total frame time */
     int    draw_calls;   /* GPU draw calls this frame */
     int    quad_count;   /* Total quads rendered this frame */
@@ -42,11 +53,14 @@ void game_loop_run(GameLoop *loop);
 /* Request the game loop to stop (from JS or another thread). */
 void game_loop_request_stop(GameLoop *loop);
 
+/* Register the lazily created renderer used for per-frame presentation. */
+struct Renderer;
+void game_loop_set_renderer(GameLoop *loop, struct Renderer **renderer_slot);
+
 /* Debug aid: stop automatically after max_frames frames (0 = never). When
    screenshot_path is non-NULL, the final frame is read back through
    *renderer_slot (dereferenced at capture time, since the renderer is created
    lazily by the game) and written there as a binary PPM (P6). */
-struct Renderer;
 void game_loop_set_frame_limit(GameLoop *loop, int max_frames,
                                const char *screenshot_path, struct Renderer **renderer_slot);
 

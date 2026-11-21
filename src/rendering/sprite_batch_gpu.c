@@ -257,6 +257,13 @@ int sprite_batch_get_culled_count(const SpriteBatch *sb)
     return sb ? sb->frame_culled : 0;
 }
 
+void sprite_batch_record_external_draw(SpriteBatch *sb, int quad_count)
+{
+    if (!sb || quad_count <= 0) return;
+    sb->frame_quads += quad_count;
+    sb->draw_calls++;
+}
+
 void sprite_batch_rebind(SpriteBatch *sb)
 {
     /* Nothing to rebind: pipeline and buffer bindings are chosen per recorded

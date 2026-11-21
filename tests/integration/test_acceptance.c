@@ -1330,6 +1330,7 @@ TEST(build_pipeline_structure)
         "src/shims/webaudio_shim.js",
         "src/shims/effekseer_shim.js",
         "src/shims/tilemap_shim.js",
+        "src/shims/scene_profile_shim.js",
         "src/shims/plugin_compat.js",
     };
     for (int i = 0; i < (int)(sizeof(shims) / sizeof(shims[0])); i++) {

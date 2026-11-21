@@ -111,6 +111,7 @@ under a `__native_*` name.
 | **Windows** 10/11 x64 | D3D12 | Visual Studio 2022 (MSVC) | GUI subsystem; the app manifest sets UTF-8 and per-monitor DPI |
 | **Linux** x64 and ARM64 | Vulkan | GCC or Clang | X11 and Wayland |
 | **macOS** (Apple Silicon and Intel) | Metal | Apple Clang (Xcode command line tools) | No OpenGL fallback — see below |
+| **Steam Link** | OpenGL ES 2.0 | Steam Link SDK GCC 9.2 | ARMv7 hard-float, SDL2; build with `build_steamlink.sh` |
 
 Android is experimental: with the NDK toolchain file the tree builds the
 runtime as `libmain.so` for an SDL3 activity (`-DANDROID_ABI=arm64-v8a`,
@@ -136,6 +137,8 @@ they are built on; set `CMAKE_OSX_DEPLOYMENT_TARGET` to support older releases
 - Python 3.8+ for the packaging tools
 - `ffmpeg` on `PATH` (or in `RMMZ_FFMPEG`), only if the game ships M4A
   audio or movies
+- For Steam Link, the Steam Link SDK (including its rootfs, toolchain,
+  SDL2 and GLESv2 libraries) and CMake 3.20 or newer
 
 SDL3, QuickJS-NG and SoLoud are fetched and built from source by CMake.
 stb_image and stb_truetype are vendored under `third_party/stb`.
@@ -174,6 +177,31 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release
 ```
 
+### Steam Link
+
+From this SDK checkout, build and package the runtime with:
+
+```bash
+cd examples/outsider
+./build_steamlink.sh
+```
+
+Pass a converted RPG Maker MZ game directory to bundle it, or set
+`RMMZ_GAME_DIR`. The script uses the SDK's SDL2 and GLESv2, builds for ARMv7
+hard-float, and creates `steamlink/apps/outsider.tgz`. Copy the resulting
+`steamlink` directory to a USB drive as described in the SDK README. Set
+`OUTSIDER_ICON` to a 116x116 PNG to include a menu icon.
+
+The Steam Link build uses the same GLES2-compatible sprite, Canvas and filter
+paths, with an SDL2 platform adapter and SDL2 audio callback. Game plugin
+filters must use WebGL 1 / GLSL ES 1.00 syntax; GLES2 does not support desktop
+GLSL 4.50 or the SDL3 GPU shader pipeline. The target build disables the
+desktop-only test suite. File-backed images release their decoded CPU pixel
+buffers after texture upload; Canvas pixel operations reload those buffers on
+demand to reduce memory use on the device. GLES2 sprite batches use one
+texture per draw, preserving sprite order and avoiding multi-sampler shader
+paths that are not reliable on all embedded drivers.
+
 On Windows `outsider.exe` is a GUI application: no console window opens
 when it is double-clicked. Output still reaches the parent console when
 launched from a shell, follows redirection, and otherwise goes to
@@ -187,7 +215,8 @@ console executable instead.
 |--------|---------|-------------|
 | `CMAKE_BUILD_TYPE` | Debug | Debug, Release, RelWithDebInfo, MinSizeRel |
 | `RMMZ_BUILD_TESTS` | ON | Build the test suite |
-| `RMMZ_RENDER_BACKEND` | gpu | Rendering backend: `gpu` (SDL3 GPU) or `gl` (OpenGL 4.5) |
+| `RMMZ_RENDER_BACKEND` | gpu | Rendering backend: `gpu` (SDL3 GPU), `gl` (OpenGL 4.5), or `gles2` (Steam Link) |
+| `RMMZ_STEAMLINK` | OFF | Use Steam Link SDK SDL2 and ARMv7 platform adapter |
 | `RMMZ_RUNTIME_SHADERS` | ON | Compile game-supplied shaders at run time (GPU backend only) |
 | `RMMZ_DEFAULT_WIDTH` / `RMMZ_DEFAULT_HEIGHT` | 816 / 624 | Initial window size |
 | `RMMZ_USE_EFFEKSEER` | OFF | Build the real Effekseer backend (stub otherwise) |
@@ -290,12 +319,47 @@ comes up.
 
 # Other options
 ./build/outsider --game "/path/to/game" --resolution 1280x720 --no-audio
+./build/outsider --game "/path/to/game" --perf 60
+./build/outsider --game "/path/to/game" --render-scale 0.75 --perf 60
+./build/outsider --game "/path/to/game" --perf-skip-tiling
+./build/outsider --game "/path/to/game" --perf-skip-sprites
+./build/outsider --game "/path/to/game" --profile-loads
+./build/outsider --game "/path/to/game" --profile-loads --profile-scenes
 
 # Debugging aids: stop after N frames with a screenshot and a JS probe,
 # or take commands from stdin (used by tools/visual_eval.py)
 ./build/outsider "/path/to/game" --frames 300 --screenshot out.ppm --probe "SceneManager._scene.constructor.name"
 ./build/outsider "/path/to/game" --control
 ```
+
+`--no-audio` disables audio playback and skips reading audio assets from disk.
+
+`--perf 60` logs average phase timings, SceneManager update time, render time
+split into transform updates and display-object traversal, plus per-type render
+timings and tile element counts, every 60 frames. Steam Link builds also report
+GPU wait attributed to tilemap, sprite-batch, and filter draws. These
+diagnostic timings force GPU synchronization and can affect frame time.
+`--render-scale` lowers internal render-target resolution while keeping the
+logical game layout and fullscreen output unchanged. It accepts values from
+0.5 to 1.0 on OpenGL builds (including Steam Link); the default is 1.0. The SDL
+GPU backend currently supports only 1.0. Lower scales can make text and artwork
+softer.
+OpenGL builds also show a temporary startup log on screen while game scripts
+load; it remains visible through boot and is replaced when the first scene is
+ready to display.
+`--perf-skip-tiling` disables all `TilingSprite` rendering for a diagnostic run
+and enables the same 60-frame performance report if `--perf` was not specified.
+`--perf-skip-sprites` suppresses regular `Sprite` drawing while preserving
+scene-graph traversal, and likewise enables the report if needed.
+`--profile-loads` logs native file-read and image read/decode/texture-upload
+times, along with image-cache hits, through the normal logger. They are written
+to the log file and shown on the startup console while it is active. The game
+screen replaces that console after boot. This option does not force GPU
+synchronization, so use it to inspect scene-loading stalls separately from
+`--perf`.
+`--profile-scenes` logs one timing summary when each scene becomes ready, splitting
+time spent waiting for the old scene to stop, scene termination/creation, readiness
+polling, and the final start call. It does not force GPU synchronization.
 
 The game directory is a normal RPG Maker MZ project: `js/`, `data/`, `img/`,
 `audio/`, `fonts/`. With no arguments the runtime looks for a `game/` folder

@@ -7,6 +7,7 @@
    the __native_filters binding, and the PIXI.Filter shim classes. */
 
 #include "rendering/filters.h"
+#include "rendering/renderer.h"
 #include "bindings/bind_filters.h"
 #include "bindings/bind_renderer.h"
 #include "bindings/bind_io.h"
@@ -56,6 +57,15 @@ static int tests_failed = 0;
 } while(0)
 
 /* C-level tests */
+
+TEST(test_render_scale_configuration)
+{
+    ASSERT(renderer_set_render_scale(0.75f));
+    ASSERT(fabsf(renderer_get_render_scale() - 0.75f) < 0.001f);
+    ASSERT(!renderer_set_render_scale(0.49f));
+    ASSERT(fabsf(renderer_get_render_scale() - 0.75f) < 0.001f);
+    ASSERT(renderer_set_render_scale(1.0f));
+}
 
 TEST(test_c_init_shutdown)
 {
@@ -517,6 +527,7 @@ int main(void)
     printf("=== Filter Tests ===\n\n");
 
     printf("--- C-level tests ---\n");
+    RUN(test_render_scale_configuration);
     RUN(test_c_init_shutdown);
     RUN(test_c_compile_null_frag);
     RUN(test_c_shader_source_not_null);

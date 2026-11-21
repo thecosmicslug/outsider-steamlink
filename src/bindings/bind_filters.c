@@ -145,6 +145,26 @@ static JSValue js_filters_begin(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+#ifdef RMMZ_GLES2
+static JSValue js_filters_begin_overwrite(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 4)
+        return JS_ThrowTypeError(ctx, "beginFilterOverwrite requires shaderId, inputTexture, w, h");
+
+    uint32_t shader, texture;
+    int w, h;
+    if (JS_ToUint32(ctx, &shader, argv[0])) return JS_EXCEPTION;
+    if (JS_ToUint32(ctx, &texture, argv[1])) return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &w, argv[2])) return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &h, argv[3])) return JS_EXCEPTION;
+
+    filter_begin_overwrite(shader, texture, w, h);
+    return JS_UNDEFINED;
+}
+#endif
+
 /* setUniform1f(shader, name, value) */
 static JSValue js_filters_uniform_1f(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv)
@@ -312,6 +332,9 @@ static const JSCFunctionListEntry js_filters_funcs[] = {
     JS_CFUNC_DEF("compileShader",   2, js_filters_compile),
     JS_CFUNC_DEF("deleteShader",    1, js_filters_delete),
     JS_CFUNC_DEF("beginFilter",     4, js_filters_begin),
+#ifdef RMMZ_GLES2
+    JS_CFUNC_DEF("beginFilterOverwrite", 4, js_filters_begin_overwrite),
+#endif
     JS_CFUNC_DEF("setUniform1f",    3, js_filters_uniform_1f),
     JS_CFUNC_DEF("setUniform2f",    4, js_filters_uniform_2f),
     JS_CFUNC_DEF("setUniformTexture", 4, js_filters_uniform_texture),

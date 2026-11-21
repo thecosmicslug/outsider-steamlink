@@ -147,7 +147,9 @@ static JSValue js_get_image_pixels(JSContext *ctx, JSValueConst this_val,
     }
 
     size_t byte_size = (size_t)info.width * (size_t)info.height * 4;
-    return JS_NewArrayBufferCopy(ctx, pixels, byte_size);
+    JSValue result = JS_NewArrayBufferCopy(ctx, pixels, byte_size);
+    image_release_pixels(handle);
+    return result;
 }
 
 /* freeImage(handle) */

@@ -510,6 +510,9 @@ Platform *platform_init(const char *title, int width, int height)
         SDL_Quit();
         return NULL;
     }
+    if (!SDL_HideCursor()) {
+        fprintf(stderr, "Warning: unable to hide mouse cursor: %s\n", SDL_GetError());
+    }
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
 #ifdef RMMZ_RENDER_GPU
@@ -665,10 +668,30 @@ void platform_swap_buffers(Platform *p)
 #endif
 }
 
+void platform_set_swap_interval(Platform *p, bool enabled)
+{
+#ifndef RMMZ_RENDER_GPU
+    if (p && p->gl_ctx) SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+#else
+    (void)p;
+    (void)enabled;
+#endif
+}
+
 void platform_get_window_size(Platform *p, int *w, int *h)
 {
     if (!p || !p->window) return;
     SDL_GetWindowSize(p->window, w, h);
+}
+
+void platform_get_drawable_size(Platform *p, int *w, int *h)
+{
+    if (!p || !p->window) return;
+#ifdef RMMZ_RENDER_GPU
+    SDL_GetWindowSize(p->window, w, h);
+#else
+    SDL_GetWindowSizeInPixels(p->window, w, h);
+#endif
 }
 
 void platform_set_window_size(Platform *p, int w, int h)

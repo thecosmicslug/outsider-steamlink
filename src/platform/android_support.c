@@ -9,7 +9,7 @@
 
 #include "io/file_io.h"
 
-#include <SDL3/SDL.h>
+#include "platform/sdl.h"
 #include <android/log.h>
 #include <pthread.h>
 #include <stdint.h>

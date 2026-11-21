@@ -13,11 +13,15 @@
  * gl_loader_init() must be called once after SDL_GL_CreateContext().
  */
 
+#ifdef RMMZ_GLES2
+#include <GLES2/gl2.h>
+#else
 #include <SDL3/SDL_opengl.h>
 
-/* X-macro list of every post-GL-1.1 function used by the runtime. */
+/* X-macro list of every function not exported by Windows' OpenGL 1.1 DLL. */
 #define RMMZ_GL_FUNCS(X) \
     /* Shaders / programs (GL 2.0) */ \
+    X(PFNGLBINDATTRIBLOCATIONPROC,         glBindAttribLocation) \
     X(PFNGLCREATESHADERPROC,               glCreateShader) \
     X(PFNGLSHADERSOURCEPROC,               glShaderSource) \
     X(PFNGLCOMPILESHADERPROC,              glCompileShader) \
@@ -40,32 +44,24 @@
     /* Textures / blending (GL 1.3 - 1.4) */ \
     X(PFNGLACTIVETEXTUREPROC,              glActiveTexture) \
     X(PFNGLBLENDFUNCSEPARATEPROC,          glBlendFuncSeparate) \
-    /* Buffers / vertex arrays / framebuffers (GL 1.5 - 3.0) */ \
+    /* Buffers, vertex attributes and framebuffers */ \
+    X(PFNGLGENBUFFERSPROC,                 glGenBuffers) \
+    X(PFNGLBINDBUFFERPROC,                 glBindBuffer) \
+    X(PFNGLBUFFERDATAPROC,                 glBufferData) \
+    X(PFNGLBUFFERSUBDATAPROC,              glBufferSubData) \
+    X(PFNGLENABLEVERTEXATTRIBARRAYPROC,    glEnableVertexAttribArray) \
+    X(PFNGLVERTEXATTRIBPOINTERPROC,        glVertexAttribPointer) \
     X(PFNGLDELETEBUFFERSPROC,              glDeleteBuffers) \
+    X(PFNGLGENVERTEXARRAYSPROC,            glGenVertexArrays) \
     X(PFNGLBINDVERTEXARRAYPROC,            glBindVertexArray) \
     X(PFNGLDELETEVERTEXARRAYSPROC,         glDeleteVertexArrays) \
+    X(PFNGLGENFRAMEBUFFERSPROC,            glGenFramebuffers) \
     X(PFNGLBINDFRAMEBUFFERPROC,            glBindFramebuffer) \
     X(PFNGLDELETEFRAMEBUFFERSPROC,         glDeleteFramebuffers) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC,       glFramebufferTexture2D) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,     glCheckFramebufferStatus) \
     X(PFNGLBLITFRAMEBUFFERPROC,            glBlitFramebuffer) \
-    /* Direct state access (GL 4.5) */ \
-    X(PFNGLCREATEBUFFERSPROC,              glCreateBuffers) \
-    X(PFNGLNAMEDBUFFERSTORAGEPROC,         glNamedBufferStorage) \
-    X(PFNGLNAMEDBUFFERDATAPROC,            glNamedBufferData) \
-    X(PFNGLNAMEDBUFFERSUBDATAPROC,         glNamedBufferSubData) \
-    X(PFNGLCREATEVERTEXARRAYSPROC,         glCreateVertexArrays) \
-    X(PFNGLENABLEVERTEXARRAYATTRIBPROC,    glEnableVertexArrayAttrib) \
-    X(PFNGLVERTEXARRAYATTRIBFORMATPROC,    glVertexArrayAttribFormat) \
-    X(PFNGLVERTEXARRAYATTRIBBINDINGPROC,   glVertexArrayAttribBinding) \
-    X(PFNGLVERTEXARRAYVERTEXBUFFERPROC,    glVertexArrayVertexBuffer) \
-    X(PFNGLVERTEXARRAYELEMENTBUFFERPROC,   glVertexArrayElementBuffer) \
-    X(PFNGLCREATETEXTURESPROC,             glCreateTextures) \
-    X(PFNGLTEXTURESTORAGE2DPROC,           glTextureStorage2D) \
-    X(PFNGLTEXTURESUBIMAGE2DPROC,          glTextureSubImage2D) \
-    X(PFNGLTEXTUREPARAMETERIPROC,          glTextureParameteri) \
-    X(PFNGLCREATEFRAMEBUFFERSPROC,         glCreateFramebuffers) \
-    X(PFNGLNAMEDFRAMEBUFFERTEXTUREPROC,    glNamedFramebufferTexture) \
-    X(PFNGLCHECKNAMEDFRAMEBUFFERSTATUSPROC, glCheckNamedFramebufferStatus) \
-    X(PFNGLCLEARNAMEDFRAMEBUFFERFVPROC,    glClearNamedFramebufferfv)
+    /* glBlitFramebuffer is used only by the desktop GL backend. */
 
 /* Declare one function pointer per entry point (rmmz_glFoo). */
 #define RMMZ_GL_DECLARE(type, name) extern type rmmz_##name;
@@ -73,6 +69,7 @@ RMMZ_GL_FUNCS(RMMZ_GL_DECLARE)
 #undef RMMZ_GL_DECLARE
 
 /* Route the standard names through the loaded pointers. */
+#define glBindAttribLocation           rmmz_glBindAttribLocation
 #define glCreateShader                 rmmz_glCreateShader
 #define glShaderSource                 rmmz_glShaderSource
 #define glCompileShader                rmmz_glCompileShader
@@ -94,34 +91,26 @@ RMMZ_GL_FUNCS(RMMZ_GL_DECLARE)
 #define glUniformMatrix4fv             rmmz_glUniformMatrix4fv
 #define glActiveTexture                rmmz_glActiveTexture
 #define glBlendFuncSeparate            rmmz_glBlendFuncSeparate
+#define glGenBuffers                   rmmz_glGenBuffers
+#define glBindBuffer                   rmmz_glBindBuffer
+#define glBufferData                   rmmz_glBufferData
+#define glBufferSubData                rmmz_glBufferSubData
+#define glEnableVertexAttribArray      rmmz_glEnableVertexAttribArray
+#define glVertexAttribPointer          rmmz_glVertexAttribPointer
 #define glDeleteBuffers                rmmz_glDeleteBuffers
+#define glGenVertexArrays              rmmz_glGenVertexArrays
 #define glBindVertexArray              rmmz_glBindVertexArray
 #define glDeleteVertexArrays           rmmz_glDeleteVertexArrays
+#define glGenFramebuffers              rmmz_glGenFramebuffers
 #define glBindFramebuffer              rmmz_glBindFramebuffer
 #define glDeleteFramebuffers           rmmz_glDeleteFramebuffers
+#define glFramebufferTexture2D         rmmz_glFramebufferTexture2D
+#define glCheckFramebufferStatus       rmmz_glCheckFramebufferStatus
 #define glBlitFramebuffer              rmmz_glBlitFramebuffer
-#define glCreateBuffers                rmmz_glCreateBuffers
-#define glNamedBufferStorage           rmmz_glNamedBufferStorage
-#define glNamedBufferData              rmmz_glNamedBufferData
-#define glNamedBufferSubData           rmmz_glNamedBufferSubData
-#define glCreateVertexArrays           rmmz_glCreateVertexArrays
-#define glEnableVertexArrayAttrib      rmmz_glEnableVertexArrayAttrib
-#define glVertexArrayAttribFormat      rmmz_glVertexArrayAttribFormat
-#define glVertexArrayAttribBinding     rmmz_glVertexArrayAttribBinding
-#define glVertexArrayVertexBuffer      rmmz_glVertexArrayVertexBuffer
-#define glVertexArrayElementBuffer     rmmz_glVertexArrayElementBuffer
-#define glCreateTextures               rmmz_glCreateTextures
-#define glTextureStorage2D             rmmz_glTextureStorage2D
-#define glTextureSubImage2D            rmmz_glTextureSubImage2D
-#define glTextureParameteri            rmmz_glTextureParameteri
-#define glCreateFramebuffers           rmmz_glCreateFramebuffers
-#define glNamedFramebufferTexture      rmmz_glNamedFramebufferTexture
-#define glCheckNamedFramebufferStatus  rmmz_glCheckNamedFramebufferStatus
-#define glClearNamedFramebufferfv      rmmz_glClearNamedFramebufferfv
 
-/* Resolve every entry point through SDL_GL_GetProcAddress.
-   Requires a current OpenGL context. Returns 0 on success, or the number of
-   functions that could not be resolved (each is logged to stderr). */
+#endif /* !RMMZ_GLES2 */
+
+/* Initialize renderer entry points after a graphics context is current. */
 int gl_loader_init(void);
 
 /* Non-zero once gl_loader_init() has succeeded. */

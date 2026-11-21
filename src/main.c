@@ -7,6 +7,7 @@
 #include "engine/js_engine.h"
 #include "engine/game_loop.h"
 #include "engine/script_loader.h"
+#include "engine/boot_console.h"
 #include "bindings/bind_io.h"
 #include "bindings/bind_image.h"
 #include "bindings/bind_canvas2d.h"
@@ -33,11 +34,12 @@
 #include "platform/win_console.h"
 #include "platform/android_support.h"
 
-#include <SDL3/SDL.h>
+#include "platform/sdl.h"
+#ifndef RMMZ_STEAMLINK
 /* SDL3 dropped the SDL2main library: including this header in the file that
    defines main() supplies the Windows GUI-subsystem WinMain entry point. */
 #include <SDL3/SDL_main.h>
-#include <SDL3/SDL_opengl.h>
+#endif
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -65,6 +67,12 @@ static void fatal_error(const char *fmt, ...)
 
     error_handler_log(LOG_ERROR, "%s", msg);
     platform_show_error_dialog(APP_TITLE, msg);
+}
+
+static void profile_log_callback(LogLevel level, const char *message, void *userdata)
+{
+    (void)userdata;
+    error_handler_log(level, "%s", message);
 }
 
 /* If a directory exists at "<exe dir>/<name>", copy its path into out.
@@ -97,6 +105,11 @@ int main(int argc, char *argv[])
     const char *probe_expr = NULL;
     int watchdog_ms = 0;
     int perf_every = 0;
+    bool profile_loads = false;
+    bool profile_scenes = false;
+    float render_scale = 1.0f;
+    bool perf_skip_tiling = false;
+    bool perf_skip_sprites = false;
     bool control_mode = false;
 
     for (int i = 1; i < argc; i++) {
@@ -116,6 +129,24 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--perf") == 0 && i + 1 < argc) {
             /* Debug: log average per-phase frame times every N frames. */
             perf_every = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--profile-loads") == 0) {
+            profile_loads = true;
+        } else if (strcmp(argv[i], "--profile-scenes") == 0) {
+            profile_scenes = true;
+        } else if (strcmp(argv[i], "--render-scale") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            render_scale = strtof(argv[++i], &end);
+            if (end == argv[i] || *end != '\0' ||
+                !(render_scale >= 0.5f && render_scale <= 1.0f)) {
+                fprintf(stderr, "Invalid render scale; expected a value from 0.5 to 1.0\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--perf-skip-tiling") == 0) {
+            /* Diagnostic: omit TilingSprite drawing while profiling. */
+            perf_skip_tiling = true;
+        } else if (strcmp(argv[i], "--perf-skip-sprites") == 0) {
+            /* Diagnostic: omit regular Sprite drawing while profiling. */
+            perf_skip_sprites = true;
         } else if (strcmp(argv[i], "--watchdog") == 0 && i + 1 < argc) {
             /* Debug: interrupt JS that blocks a frame or eval for longer than
                this many milliseconds, logging where it was. */
@@ -137,6 +168,7 @@ int main(int argc, char *argv[])
             game_dir = argv[i];
         }
     }
+    if ((perf_skip_tiling || perf_skip_sprites) && perf_every <= 0) perf_every = 60;
 
     /* No explicit paths: look for a packaged layout next to the executable
        (build_game.py produces <exe dir>/game/ with shims inside it). */
@@ -193,6 +225,23 @@ int main(int argc, char *argv[])
 
     error_handler_init(log_path, LOG_INFO);
     error_handler_log(LOG_INFO, "Outsider (RPG Maker MZ native runtime) starting");
+    if (no_audio) {
+        error_handler_log(LOG_INFO, "Audio disabled (--no-audio)");
+    }
+    if (profile_loads) {
+        error_handler_log(LOG_INFO, "Asset load profiling enabled");
+    }
+    if (profile_scenes) {
+        error_handler_log(LOG_INFO, "Scene lifecycle profiling enabled");
+    }
+    if (!renderer_set_render_scale(render_scale)) {
+        fatal_error("This rendering backend does not support --render-scale below 1.0.");
+        error_handler_shutdown();
+        return 1;
+    }
+    if (render_scale < 1.0f) {
+        error_handler_log(LOG_INFO, "Internal render scale: %.2fx", render_scale);
+    }
 
     /* Validate the game directory before opening a window, so a bad launch
        (wrong path, bare double-click) produces a clear error instead of a
@@ -222,11 +271,20 @@ int main(int argc, char *argv[])
         error_handler_shutdown();
         return 1;
     }
+    bool boot_console_ready = boot_console_init(platform);
+    if (boot_console_ready) {
+        error_handler_set_callback(boot_console_log_callback, NULL);
+        script_loader_set_log_callback(boot_console_log_callback, NULL);
+#ifdef RMMZ_HAS_GL
+    } else {
+        error_handler_log(LOG_WARN, "Could not initialize the on-screen startup log");
+#endif
+    }
 
     /* The window opens in raw pixels (DPI-aware), while NW.js scales the
        game with the desktop. Match that so the default window looks the
        same size as the original player's; --resolution is taken literally. */
-    if (!explicit_resolution) {
+    if (!explicit_resolution && !platform_is_fullscreen(platform)) {
         float desktop_scale = platform_get_desktop_scale(platform);
         if (desktop_scale > 1.0f) {
             win_w = (int)(win_w * desktop_scale + 0.5f);
@@ -237,18 +295,32 @@ int main(int argc, char *argv[])
         }
     }
 
-    error_handler_log(LOG_INFO, "Window created (%dx%d). %s ready.",
-                      win_w, win_h,
+    {
+        int actual_w = win_w;
+        int actual_h = win_h;
+        platform_get_window_size(platform, &actual_w, &actual_h);
+        error_handler_log(LOG_INFO, "Window created (%dx%d, %s). %s ready.",
+                      actual_w, actual_h,
+                      platform_is_fullscreen(platform) ? "fullscreen" : "windowed",
 #ifdef RMMZ_RENDER_GPU
                       "GPU device"
 #else
                       "OpenGL"
 #endif
                       );
+        int drawable_w = actual_w;
+        int drawable_h = actual_h;
+        platform_get_drawable_size(platform, &drawable_w, &drawable_h);
+        if (drawable_w != actual_w || drawable_h != actual_h) {
+            error_handler_log(LOG_INFO, "Window drawable: %dx%d pixels",
+                              drawable_w, drawable_h);
+        }
+    }
 
     JSEngine *js = js_engine_init();
     if (!js) {
         fatal_error("Failed to initialize JS engine");
+        boot_console_shutdown();
         platform_shutdown(platform);
         error_handler_shutdown();
         return 1;
@@ -259,9 +331,14 @@ int main(int argc, char *argv[])
         error_handler_log(LOG_INFO, "Script watchdog enabled: %d ms", watchdog_ms);
     }
 
+    bind_io_set_load_profile(profile_loads,
+                             profile_loads ? profile_log_callback : NULL, NULL);
+    bind_io_set_log_callback(profile_log_callback, NULL);
     bind_io_register(js_engine_get_context(js));
 
     /* Initialize image loader (GL enabled since we have a context). */
+    image_loader_set_load_profile(profile_loads,
+                                  profile_loads ? profile_log_callback : NULL, NULL);
     image_loader_init(true);
     bind_image_register(js_engine_get_context(js));
 
@@ -284,6 +361,25 @@ int main(int argc, char *argv[])
         audio_engine_init();
     }
     bind_audio_register(js_engine_get_context(js));
+    if (no_audio &&
+        !js_engine_eval(js, "globalThis.__outsiderNoAudio = true;", "<no-audio>")) {
+        fatal_error("Failed to configure no-audio mode");
+        js_engine_shutdown(js);
+        boot_console_shutdown();
+        platform_shutdown(platform);
+        error_handler_shutdown();
+        return 1;
+    }
+    if (profile_scenes &&
+        !js_engine_eval(js, "globalThis.__outsiderProfileScenes = true;",
+                        "<profile-scenes>")) {
+        fatal_error("Failed to enable scene lifecycle profiling");
+        js_engine_shutdown(js);
+        boot_console_shutdown();
+        platform_shutdown(platform);
+        error_handler_shutdown();
+        return 1;
+    }
 
     input_manager_init();
     bind_input_register(js_engine_get_context(js));
@@ -310,6 +406,23 @@ int main(int argc, char *argv[])
                     "Check the --game and --shims paths (see debug.log).",
                     game_dir, shim_dir);
         scripts_ok = 0;
+    }
+
+    if (perf_skip_tiling || perf_skip_sprites) {
+        const char *skip_script =
+            "globalThis.__outsiderPerfSkipTiling = %s;"
+            "globalThis.__outsiderPerfSkipSprites = %s;";
+        char script[160];
+        snprintf(script, sizeof(script), skip_script,
+                 perf_skip_tiling ? "true" : "false",
+                 perf_skip_sprites ? "true" : "false");
+        js_engine_eval(js, script, "<perf-skip-rendering>");
+    }
+    if (perf_skip_tiling) {
+        error_handler_log(LOG_INFO, "perf: TilingSprite rendering disabled for this run");
+    }
+    if (perf_skip_sprites) {
+        error_handler_log(LOG_INFO, "perf: Sprite rendering disabled for this run");
     }
 
     /* Initialize display info in JS (screen size, devicePixelRatio). */
@@ -346,6 +459,7 @@ int main(int argc, char *argv[])
         bind_filters_shutdown();
         filters_shutdown();
         js_engine_shutdown(js);
+        boot_console_shutdown();
         platform_shutdown(platform);
         error_handler_shutdown();
         return 1;
@@ -354,10 +468,13 @@ int main(int argc, char *argv[])
     if (perf_every > 0) {
         game_loop_set_perf_report(loop, perf_every);
     }
-    if (max_frames > 0) {
+    {
         extern Renderer *s_renderer;
-        game_loop_set_frame_limit(loop, max_frames, screenshot_path, &s_renderer);
-        if (probe_expr) game_loop_set_exit_probe(loop, probe_expr);
+        game_loop_set_renderer(loop, &s_renderer);
+        if (max_frames > 0) {
+            game_loop_set_frame_limit(loop, max_frames, screenshot_path, &s_renderer);
+            if (probe_expr) game_loop_set_exit_probe(loop, probe_expr);
+        }
     }
     if (control_mode) {
         extern Renderer *s_renderer;
@@ -389,6 +506,7 @@ int main(int argc, char *argv[])
     bind_filters_shutdown();
     filters_shutdown();
     js_engine_shutdown(js);
+    boot_console_shutdown();
     platform_shutdown(platform);
     error_handler_log(LOG_INFO, "Shutdown complete");
     error_handler_shutdown();

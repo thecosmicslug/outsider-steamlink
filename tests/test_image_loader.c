@@ -194,6 +194,22 @@ TEST(get_pixels_invalid_handle)
     image_loader_shutdown();
 }
 
+TEST(released_file_pixels_reload)
+{
+    image_loader_init(false);
+
+    ImageHandle h = image_load(TEST_PNG_4x4);
+    ASSERT(h != IMAGE_HANDLE_INVALID);
+    image_release_pixels(h);
+
+    const uint8_t *pixels = image_get_pixels(h);
+    ASSERT(pixels != NULL);
+    ASSERT_EQ_INT(pixels[0], 255);
+    ASSERT_EQ_INT(pixels[3], 255);
+
+    image_loader_shutdown();
+}
+
 TEST(texture_cache_hit)
 {
     image_loader_init(false);

@@ -178,6 +178,7 @@ TEST(test_js_renderer_binding_exists)
     ASSERT(js_eval_bool("typeof __native_renderer.createRenderTexture === 'function';"));
     ASSERT(js_eval_bool("typeof __native_renderer.deleteRenderTexture === 'function';"));
     ASSERT(js_eval_bool("typeof __native_renderer.drawQuad === 'function';"));
+    ASSERT(js_eval_bool("typeof __native_renderer.drawQuads === 'function';"));
     ASSERT(js_eval_bool("typeof __native_renderer.flush === 'function';"));
     ASSERT(js_eval_bool("typeof __native_renderer.setBlendMode === 'function';"));
     ASSERT(js_eval_bool("typeof __native_renderer.getDrawCalls === 'function';"));
@@ -216,6 +217,22 @@ TEST(test_js_renderer_draw_calls)
         "var dc = __native_renderer.getDrawCalls();"
         "var qc = __native_renderer.getQuadCount();"
         "dc === 0 && qc === 0;"
+    ));
+    js_teardown();
+}
+
+TEST(test_js_renderer_draw_quads)
+{
+    js_setup();
+    ASSERT(js_eval_bool(
+        "__native_renderer.init(100, 100);"
+        "var quads = new Float32Array(["
+        "  0,0,10,10,0,0,1,1,"
+        "  20,20,10,10,0,0,1,1"
+        "]);"
+        "__native_renderer.drawQuads(0, quads.buffer, 2, 0xFFFFFF, 1);"
+        "__native_renderer.flush();"
+        "__native_renderer.getQuadCount() === 2;"
     ));
     js_teardown();
 }
@@ -1064,6 +1081,35 @@ TEST(test_pixi_tiling_sprite)
     js_teardown();
 }
 
+TEST(test_pixi_tiling_sprite_batches_grid_quads)
+{
+    js_setup_with_shims();
+    ASSERT(js_eval_bool(
+        "var tex = {"
+        "  valid: true,"
+        "  baseTexture: {_glTexture: 7},"
+        "  _frame: {width: 16, height: 16},"
+        "  _uvs: {x0: 0, y0: 0, x2: 1, y2: 1}"
+        "};"
+        "var ts = new PIXI.TilingSprite(PIXI.Texture.EMPTY, 40, 20);"
+        "ts._texture = tex;"
+        "__native_renderer._active = true;"
+        "var batchCalls = 0, singleCalls = 0, gotCount = 0, gotData = [];"
+        "__native_renderer.drawQuad = function() { singleCalls++; };"
+        "__native_renderer.drawQuads = function(texture, buffer, count) {"
+        "  batchCalls++;"
+        "  gotCount = count;"
+        "  gotData = Array.prototype.slice.call(new Float32Array(buffer), 0, count * 8);"
+        "};"
+        "ts.render({});"
+        "batchCalls === 1 && singleCalls === 0 && gotCount === 6 &&"
+        "gotData[0] === 0 && gotData[1] === 0 &&"
+        "gotData[2] === 16 && gotData[3] === 16 &&"
+        "gotData[16] === 32 && gotData[18] === 8 && gotData[22] === 0.5;"
+    ));
+    js_teardown();
+}
+
 TEST(test_pixi_graphics)
 {
     js_setup_with_shims();
@@ -1404,6 +1450,26 @@ TEST(test_pixi_renderer_resize)
         "var r = new PIXI.Renderer({ width: 800, height: 600 });"
         "r.resize(1280, 720);"
         "r.width === 1280 && r.height === 720;"
+    ));
+    js_teardown();
+}
+
+TEST(test_pixi_renderer_viewport_uses_drawable_size)
+{
+    js_setup_with_shims();
+    ASSERT(js_eval_bool(
+        "window.innerWidth = 816; window.innerHeight = 624;"
+        "__native_platform = { getDrawableSize: function() {"
+        "    return { width: 1280, height: 720 };"
+        "} };"
+        "var viewport = null;"
+        "__native_renderer.setScreenViewport = function(x, y, w, h) {"
+        "    viewport = [x, y, w, h];"
+        "};"
+        "var r = new PIXI.Renderer({ width: 1104, height: 624 });"
+        "r.resize(1104, 624);"
+        "viewport[0] === 3 && viewport[1] === 0 &&"
+        "viewport[2] === 1274 && viewport[3] === 720"
     ));
     js_teardown();
 }
@@ -1791,6 +1857,7 @@ int main(void)
     RUN(test_js_renderer_init_get_size);
     RUN(test_js_renderer_resize);
     RUN(test_js_renderer_draw_calls);
+    RUN(test_js_renderer_draw_quads);
 
     printf("--- JS PIXI shim tests ---\n");
     RUN(test_pixi_namespace_exists);
@@ -1817,6 +1884,7 @@ int main(void)
     RUN(test_pixi_sprite);
     RUN(test_pixi_sprite_vertex_calculation);
     RUN(test_pixi_tiling_sprite);
+    RUN(test_pixi_tiling_sprite_batches_grid_quads);
     RUN(test_pixi_graphics);
     RUN(test_pixi_scene_graph_render);
     RUN(test_pixi_container_hierarchy_events);
@@ -1835,6 +1903,7 @@ int main(void)
     RUN(test_pixi_renderer_exists);
     RUN(test_pixi_renderer_create);
     RUN(test_pixi_renderer_resize);
+    RUN(test_pixi_renderer_viewport_uses_drawable_size);
     RUN(test_pixi_renderer_render_no_crash);
     RUN(test_pixi_renderer_extract);
     RUN(test_pixi_renderer_gl_stub);

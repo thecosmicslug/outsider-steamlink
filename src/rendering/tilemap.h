@@ -20,10 +20,22 @@ typedef struct {
 /* Draw packed tile rectangles into the sprite batch. `elements` holds 7 floats
    per tile: [setNumber, sx, sy, dx, dy, w, h]; setNumber indexes `tilesets`
    and -1 draws a shadow tile (black, 50% alpha). offset_x/y shift all
-   destination coordinates. */
-void tilemap_draw_tiles(const float *elements, int count,
-                        const TilesetInfo *tilesets, int num_tilesets,
-                        float offset_x, float offset_y,
-                        SpriteBatch *batch);
+   destination coordinates. Returns the number of visible quads queued. */
+int tilemap_draw_tiles(const float *elements, int count,
+                       const TilesetInfo *tilesets, int num_tilesets,
+                       float offset_x, float offset_y,
+                       SpriteBatch *batch);
+
+int tilemap_draw_tiles_viewport(const float *elements, int count,
+                                const TilesetInfo *tilesets, int num_tilesets,
+                                float offset_x, float offset_y,
+                                float viewport_width, float viewport_height,
+                                uint32_t cache_token, SpriteBatch *batch);
+
+void tilemap_renderer_shutdown(void);
+
+#ifdef RMMZ_STEAMLINK
+void tilemap_set_profile_gpu_sync(bool enabled);
+#endif
 
 #endif /* RMMZ_TILEMAP_H */

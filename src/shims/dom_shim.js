@@ -1700,7 +1700,24 @@
                 var vpY = Math.round((h - vpH) / 2);
                 /* GL viewport origin is bottom-left. */
                 var vpY_gl = h - vpY - vpH;
-                __native_renderer.setScreenViewport(vpX, vpY_gl, vpW, vpH);
+                var drawableW = w;
+                var drawableH = h;
+                if (typeof __native_platform !== "undefined" &&
+                    __native_platform.getDrawableSize) {
+                    var drawable = __native_platform.getDrawableSize();
+                    if (drawable && drawable.width > 0 && drawable.height > 0) {
+                        drawableW = drawable.width;
+                        drawableH = drawable.height;
+                    }
+                }
+                var drawableScale = Math.min(drawableW / gw, drawableH / gh);
+                var drawableVpW = Math.round(gw * drawableScale);
+                var drawableVpH = Math.round(gh * drawableScale);
+                var drawableVpX = Math.round((drawableW - drawableVpW) / 2);
+                var drawableVpY = Math.round((drawableH - drawableVpH) / 2);
+                var drawableVpYGl = drawableH - drawableVpY - drawableVpH;
+                __native_renderer.setScreenViewport(
+                    drawableVpX, drawableVpYGl, drawableVpW, drawableVpH);
 
                 /* Canvas layout drives Graphics.pageToCanvasX/Y mouse mapping. */
                 var canvas = document.getElementById("gameCanvas");

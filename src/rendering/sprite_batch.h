@@ -79,8 +79,41 @@ int sprite_batch_get_quad_count(const SpriteBatch *sb);
 /* Get the number of quads culled (off-screen) in the current/last frame. */
 int sprite_batch_get_culled_count(const SpriteBatch *sb);
 
+/* Include an externally-issued draw in this frame's statistics. */
+void sprite_batch_record_external_draw(SpriteBatch *sb, int quad_count);
+
 /* Re-bind shader, VAO, and projection after external GL state changes
    (e.g., after filter rendering uses a different shader). */
 void sprite_batch_rebind(SpriteBatch *sb);
+
+#ifdef RMMZ_STEAMLINK
+typedef struct {
+    double wait_ms;
+    unsigned int batch_count;
+    double slowest_wait_ms;
+    unsigned int slowest_quads;
+    uint32_t slowest_texture;
+    int slowest_blend;
+    float slowest_x;
+    float slowest_y;
+    float slowest_width;
+    float slowest_height;
+    bool slowest_white_texture;
+    float slowest_r;
+    float slowest_g;
+    float slowest_b;
+    float slowest_a;
+} SpriteBatchProfileGroupStats;
+
+typedef struct {
+    SpriteBatchProfileGroupStats sprites;
+    SpriteBatchProfileGroupStats premult_composites;
+    unsigned int blend_disabled_batches;
+    unsigned int full_screen_clear_batches;
+} SpriteBatchProfileStats;
+
+void sprite_batch_set_profile_gpu_sync(bool enabled);
+void sprite_batch_take_profile_gpu_stats(SpriteBatchProfileStats *stats);
+#endif
 
 #endif /* RMMZ_SPRITE_BATCH_H */

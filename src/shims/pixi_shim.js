@@ -2345,6 +2345,7 @@
         this._width = width || 100;
         this._height = height || 100;
         this.uvMatrix = null;
+        this._nativeTilingBuffer = null;
         this.pluginName = "tilingSprite";
         this.uvRespectAnchor = false;
 
@@ -2463,6 +2464,18 @@
                         if (offX > 0) offX -= tileW;
                         if (offY > 0) offY -= tileH;
 
+                        var drawQuads = typeof __native_renderer.drawQuads === "function";
+                        var tilingBuffer = null;
+                        if (drawQuads) {
+                            var requiredFloats = tilesX * tilesY * 8;
+                            if (!this._nativeTilingBuffer ||
+                                this._nativeTilingBuffer.length < requiredFloats) {
+                                this._nativeTilingBuffer = new Float32Array(requiredFloats);
+                            }
+                            tilingBuffer = this._nativeTilingBuffer;
+                        }
+                        var quadCount = 0;
+
                         /* Draw a grid of tiles, clipping edge tiles to sprite bounds. */
                         for (var ty = offY; ty < spriteH; ty += tileH) {
                             for (var tx = offX; tx < spriteW; tx += tileW) {
@@ -2483,14 +2496,32 @@
                                 var wx = wt.a * lx + wt.c * ly + wt.tx;
                                 var wy = wt.b * lx + wt.d * ly + wt.ty;
 
-                                __native_renderer.drawQuad(
-                                    glTex,
-                                    wx, wy,
-                                    dw * Math.abs(wt.a), dh * Math.abs(wt.d),
-                                    cu0, cv0, cu1, cv1,
-                                    this._tint, this.worldAlpha
-                                );
+                                if (drawQuads) {
+                                    var qi = quadCount * 8;
+                                    tilingBuffer[qi] = wx;
+                                    tilingBuffer[qi + 1] = wy;
+                                    tilingBuffer[qi + 2] = dw * Math.abs(wt.a);
+                                    tilingBuffer[qi + 3] = dh * Math.abs(wt.d);
+                                    tilingBuffer[qi + 4] = cu0;
+                                    tilingBuffer[qi + 5] = cv0;
+                                    tilingBuffer[qi + 6] = cu1;
+                                    tilingBuffer[qi + 7] = cv1;
+                                    quadCount++;
+                                } else {
+                                    __native_renderer.drawQuad(
+                                        glTex,
+                                        wx, wy,
+                                        dw * Math.abs(wt.a), dh * Math.abs(wt.d),
+                                        cu0, cv0, cu1, cv1,
+                                        this._tint, this.worldAlpha
+                                    );
+                                }
                             }
+                        }
+                        if (drawQuads && quadCount > 0) {
+                            __native_renderer.drawQuads(
+                                glTex, tilingBuffer.buffer, quadCount,
+                                this._tint, this.worldAlpha);
                         }
                     }
                 }
@@ -2506,6 +2537,7 @@
         Sprite.prototype.destroy.call(this, options);
         this.tileTransform = null;
         this.uvMatrix = null;
+        this._nativeTilingBuffer = null;
     };
 
     TilingSprite.from = function(source, options) {
@@ -3588,7 +3620,25 @@
                 var vpX = Math.round((ww - vpW) / 2);
                 var vpY = Math.round((wh - vpH) / 2);
                 var vpY_gl = wh - vpY - vpH;
-                __native_renderer.setScreenViewport(vpX, vpY_gl, vpW, vpH);
+                var drawableW = ww;
+                var drawableH = wh;
+                if (typeof __native_platform !== "undefined" &&
+                    __native_platform.getDrawableSize) {
+                    var drawable = __native_platform.getDrawableSize();
+                    if (drawable && drawable.width > 0 && drawable.height > 0) {
+                        drawableW = drawable.width;
+                        drawableH = drawable.height;
+                    }
+                }
+                var drawableScale = Math.min(
+                    drawableW / screenWidth, drawableH / screenHeight);
+                var drawableVpW = Math.round(screenWidth * drawableScale);
+                var drawableVpH = Math.round(screenHeight * drawableScale);
+                var drawableVpX = Math.round((drawableW - drawableVpW) / 2);
+                var drawableVpY = Math.round((drawableH - drawableVpH) / 2);
+                var drawableVpYGl = drawableH - drawableVpY - drawableVpH;
+                __native_renderer.setScreenViewport(
+                    drawableVpX, drawableVpYGl, drawableVpW, drawableVpH);
 
                 var canvas = document.getElementById("gameCanvas");
                 if (canvas) {
@@ -4256,14 +4306,20 @@
                u.blendColor !== undefined && u.brightness !== undefined;
     }
 
-    Filter.prototype.apply = function(renderer, inputTexture, outputW, outputH) {
+    Filter.prototype.apply = function(renderer, inputTexture, outputW, outputH,
+                                      overwriteTarget) {
         if (typeof __native_filters === "undefined" || !inputTexture) return;
 
         /* RMMZ ColorFilter uses the built-in native shader instead of compiling
            the PIXI-style GLSL from rmmz_core.js. */
         if (_isColorFilter(this) && __native_filters.colorFilterShader) {
             var shader = __native_filters.colorFilterShader;
-            __native_filters.beginFilter(shader, inputTexture, outputW, outputH);
+            if (overwriteTarget &&
+                typeof __native_filters.beginFilterOverwrite === "function") {
+                __native_filters.beginFilterOverwrite(shader, inputTexture, outputW, outputH);
+            } else {
+                __native_filters.beginFilter(shader, inputTexture, outputW, outputH);
+            }
             __native_filters.setUniform1f(shader, "hue", this.uniforms.hue);
             var ct = this.uniforms.colorTone;
             __native_filters.setUniform4f(shader, "colorTone", ct[0], ct[1], ct[2], ct[3]);
@@ -4592,6 +4648,8 @@
            games). */
         var passes = this._strength > 0 ? Math.max(1, this.quality) : 0;
         var strength = passes > 0 ? this._strength / passes : 0;
+        var renderScale = typeof __native_renderer.getRenderScale === "function"
+            ? __native_renderer.getRenderScale() : 1;
         var currentTex = inputTexture;
         var pooledRTs = [];
 
@@ -4603,7 +4661,7 @@
             /* Pooled FBOs keep stale contents and the filter pass blends, so clear first. */
             __native_renderer.beginFrameTransparent();
             __native_filters.beginFilter(shader, currentTex, outputW, outputH);
-            __native_filters.setUniform2f(shader, "u_direction", 1.0 / outputW, 0);
+            __native_filters.setUniform2f(shader, "u_direction", 1.0 / (outputW * renderScale), 0);
             __native_filters.setUniform1f(shader, "u_strength", strength);
             __native_filters.drawQuad();
             __native_filters.endFilter();
@@ -4614,7 +4672,7 @@
             __native_renderer.bindRenderTexture(vRT.fbo, outputW, outputH);
             __native_renderer.beginFrameTransparent();
             __native_filters.beginFilter(shader, hRT.texture, outputW, outputH);
-            __native_filters.setUniform2f(shader, "u_direction", 0, 1.0 / outputH);
+            __native_filters.setUniform2f(shader, "u_direction", 0, 1.0 / (outputH * renderScale));
             __native_filters.setUniform1f(shader, "u_strength", strength);
             __native_filters.drawQuad();
             __native_filters.endFilter();
@@ -4780,11 +4838,20 @@
             for (var fi = 0; fi < enabledFilters.length; fi++) {
                 var outputFBO = _acquireFilterFBO(screenW, screenH);
                 __native_renderer.bindRenderTexture(outputFBO.fbo, screenW, screenH);
-                __native_renderer.beginFrameTransparent();
+                var overwriteColorFilter = _isColorFilter(enabledFilters[fi]) &&
+                    __native_filters.colorFilterShader &&
+                    typeof __native_filters.beginFilterOverwrite === "function" &&
+                    typeof __native_renderer.beginFrameNoClear === "function";
+                if (overwriteColorFilter) {
+                    __native_renderer.beginFrameNoClear();
+                } else {
+                    __native_renderer.beginFrameTransparent();
+                }
 
                 /* Tell multi-pass filters where to draw their final result. */
                 _filterOutputTarget = { fbo: outputFBO.fbo, w: screenW, h: screenH };
-                enabledFilters[fi].apply(renderer, currentTex, screenW, screenH);
+                enabledFilters[fi].apply(
+                    renderer, currentTex, screenW, screenH, overwriteColorFilter);
                 _filterOutputTarget = null;
 
                 __native_renderer.flush();

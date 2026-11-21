@@ -17,7 +17,7 @@ typedef enum {
     LOG_ERROR = 3
 } LogLevel;
 
-/* Callback signature for log output capture (used by tests). */
+/* Callback signature for additional log consumers. */
 typedef void (*LogCallback)(LogLevel level, const char *message, void *userdata);
 
 /* Initialize logging. log_file_path may be NULL to disable file output;
@@ -36,7 +36,7 @@ void error_handler_set_level(LogLevel min_level);
 /* Get the current minimum log level. */
 LogLevel error_handler_get_level(void);
 
-/* Set a log callback for capturing output (primarily for testing).
+/* Set an optional log callback.
    When set, log output goes to the callback in addition to file/console. */
 void error_handler_set_callback(LogCallback cb, void *userdata);
 

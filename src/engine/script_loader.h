@@ -7,6 +7,7 @@
 #define RMMZ_SCRIPT_LOADER_H
 
 #include "engine/js_engine.h"
+#include "engine/error_handler.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -31,6 +32,10 @@ void script_loader_free_plugins(PluginList *list);
 /* Load everything in order: shims, libs, rmmz core scripts, enabled plugins,
    post-core shims, main.js; then start the game. Returns false on fatal error. */
 bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *game_dir);
+
+/* Mirror loader progress messages to an optional callback while retaining
+   the existing console output. */
+void script_loader_set_log_callback(LogCallback callback, void *userdata);
 
 /* Load only the shim files (for tests without game files). */
 bool script_loader_load_shims(JSEngine *engine, const char *shim_dir);

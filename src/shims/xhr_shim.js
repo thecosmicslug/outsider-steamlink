@@ -16,6 +16,10 @@
     var LOADING = 3;
     var DONE = 4;
 
+    function isAudioPath(url) {
+        return /(?:^|\/)audio\//i.test(url.replace(/\\/g, "/"));
+    }
+
     function XMLHttpRequest() {
         this.readyState = UNSENT;
         this.status = 0;
@@ -80,16 +84,21 @@
                 /* RPG Maker MZ percent-encodes filenames; the filesystem needs literal names. */
                 url = decodeURIComponent(self._url);
                 isBinary = (self.responseType === "arraybuffer");
-                found = __native_io.existsSync(url);
-                if (found) {
-                    if (isBinary) {
-                        data = __native_io.readFileBinary(url);
-                    } else {
-                        data = __native_io.readFileSync(url);
-                        /* Browsers strip a leading UTF-8 BOM from responseText;
-                           JSON.parse would reject it. */
-                        if (typeof data === "string" && data.charCodeAt(0) === 0xFEFF) {
-                            data = data.slice(1);
+                if (globalThis.__outsiderNoAudio === true && isBinary && isAudioPath(url)) {
+                    found = true;
+                    data = new ArrayBuffer(0);
+                } else {
+                    found = __native_io.existsSync(url);
+                    if (found) {
+                        if (isBinary) {
+                            data = __native_io.readFileBinary(url);
+                        } else {
+                            data = __native_io.readFileSync(url);
+                            /* Browsers strip a leading UTF-8 BOM from responseText;
+                               JSON.parse would reject it. */
+                            if (typeof data === "string" && data.charCodeAt(0) === 0xFEFF) {
+                                data = data.slice(1);
+                            }
                         }
                     }
                 }

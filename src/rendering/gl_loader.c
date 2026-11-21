@@ -5,8 +5,23 @@
 
 #include "rendering/gl_loader.h"
 
-#include <SDL3/SDL.h>
 #include <stdio.h>
+
+#ifdef RMMZ_GLES2
+
+int gl_loader_init(void)
+{
+    return 0;
+}
+
+int gl_loader_is_ready(void)
+{
+    return 1;
+}
+
+#else
+
+#include "platform/sdl.h"
 
 #define RMMZ_GL_DEFINE(type, name) type rmmz_##name = NULL;
 RMMZ_GL_FUNCS(RMMZ_GL_DEFINE)
@@ -35,3 +50,5 @@ int gl_loader_is_ready(void)
 {
     return s_ready;
 }
+
+#endif

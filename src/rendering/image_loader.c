@@ -7,9 +7,11 @@
 #include "io/file_io.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>   /* INT_MAX */
+#include <time.h>
 
 /* stb_image implementation lives in this translation unit. */
 #define STB_IMAGE_IMPLEMENTATION
@@ -27,7 +29,8 @@ typedef struct CacheEntry {
     uint8_t     *pixels;    /* RGBA pixel data (stbi_image_free). */
     int          width;
     int          height;
-    uint32_t     gl_texture; /* Renderer texture id, 0 if none. */
+    uint32_t     gl_texture; /* Renderer texture id, 0 if none */
+    bool         reload_from_file;
     ImageHandle  handle;
     int          refcount;  /* Loads sharing this entry; freed when it hits 0. */
     struct CacheEntry *next;
@@ -39,7 +42,43 @@ typedef struct CacheEntry {
 static CacheEntry *s_cache[CACHE_BUCKETS];
 static CacheEntry *s_handle_index[MAX_HANDLES]; /* Direct lookup by handle. */
 static bool         s_gl_enabled  = false;
+static bool         s_profile_loads = false;
+static LogCallback  s_profile_log_callback;
+static void        *s_profile_log_userdata;
 static size_t       s_cache_count = 0;
+
+void image_loader_set_load_profile(bool enabled, LogCallback callback, void *userdata)
+{
+    s_profile_loads = enabled;
+    s_profile_log_callback = callback;
+    s_profile_log_userdata = userdata;
+}
+
+static double profile_time_ms(void)
+{
+    struct timespec ts;
+#ifdef _WIN32
+    timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static void profile_log(const char *fmt, ...)
+{
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    if (s_profile_log_callback) {
+        s_profile_log_callback(LOG_INFO, message, s_profile_log_userdata);
+    } else {
+        fprintf(stderr, "%s\n", message);
+    }
+}
 
 /* FNV-1a hash of a cache key, reduced to a bucket index. */
 static unsigned int hash_key(const char *key)
@@ -89,7 +128,7 @@ static void delete_gl_texture(uint32_t tex)
 }
 
 static CacheEntry *cache_insert(const char *key, uint8_t *pixels,
-                                int w, int h)
+                                int w, int h, bool reload_from_file)
 {
     CacheEntry *entry = calloc(1, sizeof(CacheEntry));
     if (!entry) return NULL;
@@ -116,11 +155,21 @@ static CacheEntry *cache_insert(const char *key, uint8_t *pixels,
     entry->pixels = pixels;
     entry->width  = w;
     entry->height = h;
+    entry->reload_from_file = reload_from_file;
     entry->handle = new_handle;
     entry->refcount = 1;
 
     if (s_gl_enabled) {
+        double upload_start = s_profile_loads ? profile_time_ms() : 0.0;
         entry->gl_texture = upload_gl_texture(pixels, w, h);
+        if (s_profile_loads) {
+            profile_log("[load] texture-upload key=%s size=%dx%d time=%.2fms",
+                        key, w, h, profile_time_ms() - upload_start);
+        }
+        if (reload_from_file && entry->gl_texture) {
+            stbi_image_free(entry->pixels);
+            entry->pixels = NULL;
+        }
     }
 
     unsigned int bucket = hash_key(key);
@@ -175,11 +224,20 @@ ImageHandle image_load(const char *path)
     if (existing) {
         /* Each sharing loader must balance this with image_free. */
         existing->refcount++;
+        if (s_profile_loads) {
+            profile_log("[load] image-cache-hit key=%s refs=%d",
+                        path, existing->refcount);
+        }
         return existing->handle;
     }
 
     size_t file_size = 0;
+    double read_start = s_profile_loads ? profile_time_ms() : 0.0;
     uint8_t *file_data = file_io_read_binary(path, &file_size);
+    if (s_profile_loads && file_data) {
+        profile_log("[load] image-read path=%s bytes=%zu time=%.2fms",
+                    path, file_size, profile_time_ms() - read_start);
+    }
     if (!file_data) {
         fprintf(stderr, "image_load: failed to read file: %s\n", path);
         return IMAGE_HANDLE_INVALID;
@@ -191,17 +249,23 @@ ImageHandle image_load(const char *path)
         return IMAGE_HANDLE_INVALID;
     }
     int w, h, channels;
+    double decode_start = s_profile_loads ? profile_time_ms() : 0.0;
     uint8_t *pixels = stbi_load_from_memory(file_data, (int)file_size,
                                             &w, &h, &channels, 4);
-    free(file_data);
+    if (s_profile_loads && pixels) {
+        profile_log("[load] image-decode path=%s size=%dx%d time=%.2fms",
+                    path, w, h, profile_time_ms() - decode_start);
+    }
 
     if (!pixels) {
         fprintf(stderr, "image_load: failed to decode image: %s (%s)\n",
                 path, stbi_failure_reason());
+        free(file_data);
         return IMAGE_HANDLE_INVALID;
     }
 
-    CacheEntry *entry = cache_insert(path, pixels, w, h);
+    CacheEntry *entry = cache_insert(path, pixels, w, h, true);
+    free(file_data);
     if (!entry) {
         stbi_image_free(pixels);
         return IMAGE_HANDLE_INVALID;
@@ -219,6 +283,10 @@ ImageHandle image_load_from_memory(const char *key,
     CacheEntry *existing = cache_find_by_key(key);
     if (existing) {
         existing->refcount++;
+        if (s_profile_loads) {
+            profile_log("[load] image-cache-hit key=%s refs=%d",
+                        key, existing->refcount);
+        }
         return existing->handle;
     }
 
@@ -226,15 +294,20 @@ ImageHandle image_load_from_memory(const char *key,
     if (size > INT_MAX) return IMAGE_HANDLE_INVALID;
 
     int w, h, channels;
+    double decode_start = s_profile_loads ? profile_time_ms() : 0.0;
     uint8_t *pixels = stbi_load_from_memory(data, (int)size,
                                             &w, &h, &channels, 4);
+    if (s_profile_loads && pixels) {
+        profile_log("[load] image-decode key=%s size=%dx%d time=%.2fms",
+                    key, w, h, profile_time_ms() - decode_start);
+    }
     if (!pixels) {
         fprintf(stderr, "image_load_from_memory: failed to decode (%s)\n",
                 stbi_failure_reason());
         return IMAGE_HANDLE_INVALID;
     }
 
-    CacheEntry *entry = cache_insert(key, pixels, w, h);
+    CacheEntry *entry = cache_insert(key, pixels, w, h, false);
     if (!entry) {
         stbi_image_free(pixels);
         return IMAGE_HANDLE_INVALID;
@@ -260,7 +333,45 @@ const uint8_t *image_get_pixels(ImageHandle handle)
 {
     if (handle == IMAGE_HANDLE_INVALID) return NULL;
     CacheEntry *e = cache_find_by_handle(handle);
-    return e ? e->pixels : NULL;
+    if (!e) return NULL;
+    if (!e->pixels && e->reload_from_file) {
+        size_t file_size = 0;
+        uint8_t *file_data = file_io_read_binary(e->key, &file_size);
+        if (!file_data) {
+            fprintf(stderr, "image_get_pixels: failed to reread image: %s\n", e->key);
+            return NULL;
+        }
+        if (file_size > INT_MAX) {
+            fprintf(stderr, "image_get_pixels: file too large: %s\n", e->key);
+            free(file_data);
+            return NULL;
+        }
+        int w, h, channels;
+        uint8_t *pixels = stbi_load_from_memory(file_data, (int)file_size,
+                                                &w, &h, &channels, 4);
+        free(file_data);
+        if (!pixels) {
+            fprintf(stderr, "image_get_pixels: failed to decode image: %s (%s)\n",
+                    e->key, stbi_failure_reason());
+            return NULL;
+        }
+        if (w != e->width || h != e->height) {
+            fprintf(stderr, "image_get_pixels: image dimensions changed: %s\n", e->key);
+            stbi_image_free(pixels);
+            return NULL;
+        }
+        e->pixels = pixels;
+    }
+    return e->pixels;
+}
+
+void image_release_pixels(ImageHandle handle)
+{
+    CacheEntry *e = cache_find_by_handle(handle);
+    if (e && e->reload_from_file && e->pixels) {
+        stbi_image_free(e->pixels);
+        e->pixels = NULL;
+    }
 }
 
 void image_free(ImageHandle handle)

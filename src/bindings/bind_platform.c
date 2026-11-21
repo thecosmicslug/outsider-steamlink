@@ -7,7 +7,7 @@
 #include "platform/platform.h"
 
 #include <quickjs.h>
-#include <SDL3/SDL.h>
+#include "platform/sdl.h"
 #include <stdio.h>
 
 static Platform *s_platform = NULL;
@@ -77,6 +77,20 @@ static JSValue js_platform_get_window_size(JSContext *ctx, JSValueConst this_val
     return obj;
 }
 
+/* getDrawableSize() -> {width, height} */
+static JSValue js_platform_get_drawable_size(JSContext *ctx, JSValueConst this_val,
+                                             int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    int w = 0, h = 0;
+    if (s_platform) platform_get_drawable_size(s_platform, &w, &h);
+
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, w));
+    JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, h));
+    return obj;
+}
+
 /* setWindowTitle(title) - window title becomes "<title> [Outsider]", or just
    "Outsider" when the title is empty. Called from the document.title setter. */
 static JSValue js_platform_set_window_title(JSContext *ctx, JSValueConst this_val,
@@ -117,6 +131,7 @@ static const JSCFunctionListEntry js_platform_funcs[] = {
     JS_CFUNC_DEF("getDisplaySize",   0, js_platform_get_display_size),
     JS_CFUNC_DEF("getDisplayScale",  0, js_platform_get_display_scale),
     JS_CFUNC_DEF("getWindowSize",    0, js_platform_get_window_size),
+    JS_CFUNC_DEF("getDrawableSize",  0, js_platform_get_drawable_size),
     JS_CFUNC_DEF("setWindowTitle",   1, js_platform_set_window_title),
     JS_CFUNC_DEF("quit",             0, js_platform_quit),
 };

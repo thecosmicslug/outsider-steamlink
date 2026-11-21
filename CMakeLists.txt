@@ -15,19 +15,25 @@ include(CMakeDependentOption)
 option(RMMZ_BUILD_TESTS "Build tests" ON)
 # The tests are desktop executables; an Android build produces only the
 # runtime library.
-if(ANDROID)
+option(RMMZ_STEAMLINK "Build for the Valve Steam Link SDK" OFF)
+if(ANDROID OR RMMZ_STEAMLINK)
     set(RMMZ_BUILD_TESTS OFF)
 endif()
 option(RMMZ_WIN32_CONSOLE "Windows: build outsider as a console application instead of a GUI application" OFF)
 
-# Rendering backend. "gpu" targets SDL3's GPU API (Vulkan, D3D12 or Metal)
-# with the shader bytecode in src/rendering/shaders; "gl" is the original
-# OpenGL 4.5 path, kept as a fallback for machines without a supported GPU
-# backend.
-set(RMMZ_RENDER_BACKEND "gpu" CACHE STRING "Rendering backend: gpu or gl")
-set_property(CACHE RMMZ_RENDER_BACKEND PROPERTY STRINGS gpu gl)
-if(NOT RMMZ_RENDER_BACKEND MATCHES "^(gl|gpu)$")
-    message(FATAL_ERROR "RMMZ_RENDER_BACKEND must be gpu or gl")
+# Rendering backend. "gpu" targets SDL3's GPU API (Vulkan, D3D12 or Metal),
+# "gl" targets desktop OpenGL 4.5, and "gles2" targets the Steam Link's
+# OpenGL ES 2.0 API.
+set(RMMZ_RENDER_BACKEND "gpu" CACHE STRING "Rendering backend: gpu, gl, or gles2")
+set_property(CACHE RMMZ_RENDER_BACKEND PROPERTY STRINGS gpu gl gles2)
+if(NOT RMMZ_RENDER_BACKEND MATCHES "^(gl|gpu|gles2)$")
+    message(FATAL_ERROR "RMMZ_RENDER_BACKEND must be gpu, gl, or gles2")
+endif()
+if(RMMZ_STEAMLINK AND NOT RMMZ_RENDER_BACKEND STREQUAL "gles2")
+    message(FATAL_ERROR "Steam Link builds require -DRMMZ_RENDER_BACKEND=gles2")
+endif()
+if(RMMZ_RENDER_BACKEND STREQUAL "gles2" AND NOT RMMZ_STEAMLINK)
+    message(FATAL_ERROR "RMMZ_RENDER_BACKEND=gles2 is reserved for Steam Link builds")
 endif()
 
 # Apple's OpenGL stops at 4.1 core and is deprecated; the GL renderer is built
@@ -107,14 +113,16 @@ set(RMMZ_DEFAULT_HEIGHT 624 CACHE STRING "Default window height")
 # Third-party dependencies
 add_subdirectory(third_party)
 
-# Link OpenGL (the GL backend, and the tests, which build the headless
-# rendering sources). Android has no desktop OpenGL: only the GPU backend
-# (Vulkan) is available there.
+# Link the graphics API required by the selected backend.
 if(ANDROID)
     if(NOT RMMZ_RENDER_BACKEND STREQUAL "gpu")
         message(FATAL_ERROR "Android supports only -DRMMZ_RENDER_BACKEND=gpu")
     endif()
     set(RMMZ_GL_LIB "")
+elseif(RMMZ_RENDER_BACKEND STREQUAL "gles2")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GLESV2 REQUIRED IMPORTED_TARGET glesv2)
+    set(RMMZ_GL_LIB PkgConfig::GLESV2)
 else()
     find_package(OpenGL REQUIRED)
     set(RMMZ_GL_LIB OpenGL::GL)
@@ -138,13 +146,21 @@ else()
     )
 endif()
 
+# The Steam Link firmware ships SDL2; desktop builds use SDL3.
+if(RMMZ_STEAMLINK)
+    set(RMMZ_PLATFORM_SOURCE src/platform/platform_sdl2.c)
+else()
+    set(RMMZ_PLATFORM_SOURCE src/platform/platform_sdl3.c)
+endif()
+
 # Main runtime sources
 set(RMMZ_RUNTIME_SOURCES
     src/main.c
     ${RMMZ_RENDER_SOURCES}
-    src/platform/platform_sdl3.c
+    ${RMMZ_PLATFORM_SOURCE}
     src/platform/win_console.c
     src/platform/android_support.c
+    src/engine/boot_console.c
     src/engine/js_engine.c
     src/engine/game_loop.c
     src/engine/error_handler.c
@@ -207,21 +223,32 @@ target_compile_definitions(outsider PRIVATE
     RMMZ_DEFAULT_WIDTH=${RMMZ_DEFAULT_WIDTH}
     RMMZ_DEFAULT_HEIGHT=${RMMZ_DEFAULT_HEIGHT}
     $<$<BOOL:${RMMZ_USE_EFFEKSEER}>:RMMZ_HAS_EFFEKSEER>
+    $<$<BOOL:${RMMZ_STEAMLINK}>:RMMZ_STEAMLINK>
 )
 
 if(RMMZ_RENDER_BACKEND STREQUAL "gpu")
     target_compile_definitions(outsider PRIVATE RMMZ_RENDER_GPU)
+elseif(RMMZ_RENDER_BACKEND STREQUAL "gles2")
+    target_compile_definitions(outsider PRIVATE RMMZ_HAS_GL RMMZ_GLES2)
 else()
     target_compile_definitions(outsider PRIVATE RMMZ_HAS_GL)
 endif()
 
 target_link_libraries(outsider PRIVATE
-    SDL3::SDL3
+    rmmz_sdl
     ${RMMZ_GL_LIB}
     qjs
     soloud
     ${RMMZ_SYS_LIBS}
 )
+
+if(RMMZ_STEAMLINK)
+    target_link_options(outsider PRIVATE
+        "-Wl,-rpath-link,${CMAKE_SYSROOT}/lib"
+        "-Wl,-rpath-link,${CMAKE_SYSROOT}/usr/lib"
+        "-Wl,-rpath-link,${CMAKE_SYSROOT}/usr/lib/arm-linux-gnueabihf"
+    )
+endif()
 
 if(RMMZ_RUNTIME_SHADERS)
     target_link_libraries(outsider PRIVATE
@@ -241,9 +268,8 @@ endif()
 # headers and import library unconditionally -- and without a component those
 # land in the same prefix and ship inside the archive.
 install(TARGETS outsider
-    RUNTIME DESTINATION .
-    LIBRARY DESTINATION .
-    COMPONENT runtime
+    RUNTIME DESTINATION . COMPONENT runtime
+    LIBRARY DESTINATION . COMPONENT runtime
 )
 
 # Install shim JS files alongside executable

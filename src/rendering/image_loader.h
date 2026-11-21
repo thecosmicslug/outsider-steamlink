@@ -6,6 +6,8 @@
 #ifndef RMMZ_IMAGE_LOADER_H
 #define RMMZ_IMAGE_LOADER_H
 
+#include "engine/error_handler.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -27,6 +29,9 @@ typedef struct {
    Pass false for headless / test environments. */
 void image_loader_init(bool enable_gl);
 
+/* Log image cache hits and file-read, decode, and texture-upload timings. */
+void image_loader_set_load_profile(bool enabled, LogCallback callback, void *userdata);
+
 /* Shut down and free all cached images and textures. */
 void image_loader_shutdown(void);
 
@@ -45,8 +50,12 @@ ImageHandle image_load_from_memory(const char *key,
 bool image_get_info(ImageHandle handle, ImageInfo *out);
 
 /* Get raw RGBA pixel data for a loaded image.
-   Returns NULL if handle is invalid. Caller must NOT free the returned pointer. */
+   Returns NULL if handle is invalid or pixels cannot be loaded. Caller must
+   NOT free the returned pointer; call image_release_pixels when finished. */
 const uint8_t *image_get_pixels(ImageHandle handle);
+
+/* Release temporary pixel data loaded for a file-backed image. */
+void image_release_pixels(ImageHandle handle);
 
 /* Release a cached image (decrements ref or removes from cache).
    After this call the handle may become invalid. */

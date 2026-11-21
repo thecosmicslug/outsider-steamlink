@@ -5,7 +5,7 @@
 
 #include "platform/win_console.h"
 
-#include <SDL3/SDL.h>
+#include "platform/sdl.h"
 #include <stdio.h>
 
 #ifdef _WIN32

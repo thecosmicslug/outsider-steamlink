@@ -7,10 +7,59 @@
 #include "io/file_io.h"
 
 #include <quickjs.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define PATH_BUF_SIZE 4096
+
+static bool s_profile_loads;
+static LogCallback s_profile_log_callback;
+static void *s_profile_log_userdata;
+static LogCallback s_log_callback;
+static void *s_log_userdata;
+
+void bind_io_set_load_profile(bool enabled, LogCallback callback, void *userdata)
+{
+    s_profile_loads = enabled;
+    s_profile_log_callback = callback;
+    s_profile_log_userdata = userdata;
+}
+
+void bind_io_set_log_callback(LogCallback callback, void *userdata)
+{
+    s_log_callback = callback;
+    s_log_userdata = userdata;
+}
+
+static double profile_time_ms(void)
+{
+    struct timespec ts;
+#ifdef _WIN32
+    timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static void profile_log(const char *fmt, ...)
+{
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    if (s_profile_log_callback) {
+        s_profile_log_callback(LOG_INFO, message, s_profile_log_userdata);
+    } else {
+        fprintf(stderr, "%s\n", message);
+    }
+}
 
 /* Resolve a JS string argument to an absolute path in `out`. Returns the JS
    C-string (caller must JS_FreeCString) or NULL with a pending exception. */
@@ -41,9 +90,14 @@ static JSValue js_read_file_sync(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, raw);
 
     size_t size = 0;
+    double start = s_profile_loads ? profile_time_ms() : 0.0;
     char *data = file_io_read_text(resolved, &size);
     if (!data) {
         return JS_ThrowInternalError(ctx, "failed to read file: %s", resolved);
+    }
+    if (s_profile_loads) {
+        profile_log("[load] file-read text path=%s bytes=%zu time=%.2fms",
+                    resolved, size, profile_time_ms() - start);
     }
 
     JSValue result = JS_NewStringLen(ctx, data, size);
@@ -64,9 +118,14 @@ static JSValue js_read_file_binary(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, raw);
 
     size_t size = 0;
+    double start = s_profile_loads ? profile_time_ms() : 0.0;
     uint8_t *data = file_io_read_binary(resolved, &size);
     if (!data) {
         return JS_ThrowInternalError(ctx, "failed to read binary file: %s", resolved);
+    }
+    if (s_profile_loads) {
+        profile_log("[load] file-read binary path=%s bytes=%zu time=%.2fms",
+                    resolved, size, profile_time_ms() - start);
     }
 
     JSValue result = JS_NewArrayBufferCopy(ctx, data, size);
@@ -153,6 +212,25 @@ static JSValue js_exists_sync(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, raw);
 
     return JS_NewBool(ctx, file_io_exists(resolved));
+}
+
+static JSValue js_log_info(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "logInfo requires a message");
+
+    const char *message = JS_ToCString(ctx, argv[0]);
+    if (!message) return JS_EXCEPTION;
+
+    if (s_log_callback) {
+        s_log_callback(LOG_INFO, message, s_log_userdata);
+    } else {
+        fprintf(stderr, "%s\n", message);
+    }
+
+    JS_FreeCString(ctx, message);
+    return JS_UNDEFINED;
 }
 
 /* isDirSync(path) -> bool */
@@ -266,6 +344,7 @@ static const JSCFunctionListEntry js_io_funcs[] = {
     JS_CFUNC_DEF("writeFileBinary", 2, js_write_file_binary),
     JS_CFUNC_DEF("mkdirSync",       1, js_mkdir_sync),
     JS_CFUNC_DEF("existsSync",      1, js_exists_sync),
+    JS_CFUNC_DEF("logInfo",         1, js_log_info),
     JS_CFUNC_DEF("isDirSync",       1, js_is_dir_sync),
     JS_CFUNC_DEF("readdirSync",     1, js_readdir_sync),
     JS_CFUNC_DEF("unlinkSync",      1, js_unlink_sync),

@@ -25,6 +25,21 @@ static int tests_run = 0;
 static int tests_passed = 0;
 static int tests_failed = 0;
 
+typedef struct {
+    int count;
+    bool saw_plugin;
+} ScriptLogCapture;
+
+static void capture_script_log(LogLevel level, const char *message, void *userdata)
+{
+    (void)level;
+    ScriptLogCapture *capture = userdata;
+    capture->count++;
+    if (strstr(message, "script_loader: plugin TestPlugin")) {
+        capture->saw_plugin = true;
+    }
+}
+
 #define TEST(name)                                                     \
     static void test_##name(void);                                     \
     static void run_##name(void) {                                     \
@@ -277,8 +292,8 @@ TEST(load_order_without_plugins)
     size_t count = 0;
     char **order = script_loader_get_load_order("src/shims", game_dir, &count);
     ASSERT(order != NULL);
-    /* 11 shims + 1 lib + 6 core + 1 post-core shim + 1 main.js = 20 */
-    ASSERT(count == 20);
+    /* 11 shims + 1 lib + 6 core + 2 post-core shims + 1 main.js = 21 */
+    ASSERT(count == 21);
 
     /* Shims first */
     ASSERT(strstr(order[0], "dom_shim.js") != NULL);
@@ -304,8 +319,9 @@ TEST(load_order_without_plugins)
     ASSERT(strstr(order[17], "rmmz_windows.js") != NULL);
 
     ASSERT(strstr(order[18], "tilemap_shim.js") != NULL);
+    ASSERT(strstr(order[19], "scene_profile_shim.js") != NULL);
 
-    ASSERT(strstr(order[19], "main.js") != NULL);
+    ASSERT(strstr(order[20], "main.js") != NULL);
 
     script_loader_free_path_list(order, count);
     PASS();
@@ -334,17 +350,103 @@ TEST(load_order_with_plugins)
     size_t count = 0;
     char **order = script_loader_get_load_order("src/shims", game_dir, &count);
     ASSERT(order != NULL);
-    /* 11 shims + 1 lib + 6 core + 1 post-core shim + 2 enabled plugins + 1 main = 22 */
-    ASSERT(count == 22);
+    /* 11 shims + 1 lib + 6 core + 2 post-core shims + 2 plugins + 1 main = 23 */
+    ASSERT(count == 23);
 
-    /* Post-core shims come after core, then enabled plugins, then main.js */
+    /* The load-order query lists post-core shims after core and before plugins. */
     ASSERT(strstr(order[18], "tilemap_shim.js") != NULL);
+    ASSERT(strstr(order[19], "scene_profile_shim.js") != NULL);
 
-    ASSERT(strstr(order[19], "Alpha.js") != NULL);
-    ASSERT(strstr(order[20], "Gamma.js") != NULL);  /* Beta is disabled */
-    ASSERT(strstr(order[21], "main.js") != NULL);
+    ASSERT(strstr(order[20], "Alpha.js") != NULL);
+    ASSERT(strstr(order[21], "Gamma.js") != NULL);  /* Beta is disabled */
+    ASSERT(strstr(order[22], "main.js") != NULL);
 
     script_loader_free_path_list(order, count);
+    PASS();
+}
+
+TEST(scene_profile_reports_transition_phases)
+{
+    JSEngine *engine = js_engine_init();
+    ASSERT(engine != NULL);
+
+    ASSERT(eval_ok(engine,
+        "var clock = 0, sceneMessages = [];"
+        "globalThis.performance = { now: function() { return clock; } };"
+        "globalThis.__outsiderProfileScenes = true;"
+        "globalThis.__native_io = { logInfo: function(message) { sceneMessages.push(message); } };"
+        "function Scene_Title() { this._started = true; }"
+        "Scene_Title.prototype.isStarted = function() { return this._started; };"
+        "Scene_Title.prototype.isBusy = function() { return false; };"
+        "Scene_Title.prototype.stop = function() { clock += 2; };"
+        "Scene_Title.prototype.terminate = function() { clock += 1; };"
+        "function Scene_Menu() { this._started = false; this._readyCalls = 0; }"
+        "Scene_Menu.prototype.isStarted = function() { return this._started; };"
+        "Scene_Menu.prototype.create = function() { clock += 3; };"
+        "Scene_Menu.prototype.isReady = function() {"
+        "  clock += 1; return ++this._readyCalls >= 2;"
+        "};"
+        "Scene_Menu.prototype.start = function() { clock += 2; this._started = true; };"
+        "globalThis.SceneManager = {"
+        "  _scene: new Scene_Title(), _nextScene: null,"
+        "  isSceneChanging: function() { return !!this._nextScene; },"
+        "  isCurrentSceneBusy: function() { return this._scene && this._scene.isBusy(); },"
+        "  goto: function(sceneClass) {"
+        "    if (sceneClass) this._nextScene = new sceneClass();"
+        "    if (this._scene) this._scene.stop();"
+        "  },"
+        "  changeScene: function() {"
+        "    if (this.isSceneChanging() && !this.isCurrentSceneBusy()) {"
+        "      if (this._scene) this._scene.terminate();"
+        "      this._scene = this._nextScene; this._nextScene = null;"
+        "      if (this._scene) this._scene.create();"
+        "    }"
+        "  },"
+        "  updateScene: function() {"
+        "    if (this._scene && !this._scene.isStarted() && this._scene.isReady())"
+        "      this._scene.start();"
+        "  }"
+        "};"));
+    ASSERT(js_engine_eval_file(engine, "src/shims/scene_profile_shim.js"));
+    ASSERT(eval_ok(engine,
+        "SceneManager.goto(Scene_Menu);"
+        "SceneManager.changeScene();"
+        "SceneManager.updateScene();"
+        "SceneManager.updateScene();"));
+
+    char *message = eval_str(engine, "sceneMessages[0]");
+    ASSERT(message != NULL);
+    ASSERT(strstr(message, "Scene_Title -> Scene_Menu") != NULL);
+    ASSERT(strstr(message, "queued=2.0ms") != NULL);
+    ASSERT(strstr(message, "change=4.0ms") != NULL);
+    ASSERT(strstr(message, "ready=4.0ms") != NULL);
+    ASSERT(strstr(message, "ready-work=1.0ms/1") != NULL);
+    ASSERT(strstr(message, "start-call=3.0ms") != NULL);
+    ASSERT(strstr(message, "total=10.0ms") != NULL);
+    js_engine_free_string(message);
+
+    js_engine_shutdown(engine);
+    PASS();
+}
+
+TEST(scene_profile_is_inactive_without_flag)
+{
+    JSEngine *engine = js_engine_init();
+    ASSERT(engine != NULL);
+
+    ASSERT(eval_ok(engine,
+        "globalThis.__outsiderProfileScenes = false;"
+        "var originalSceneGoto = function() {};"
+        "globalThis.SceneManager = { goto: originalSceneGoto };"));
+    ASSERT(js_engine_eval_file(engine, "src/shims/scene_profile_shim.js"));
+
+    char *result = eval_str(engine,
+        "SceneManager.goto === originalSceneGoto");
+    ASSERT(result != NULL);
+    ASSERT(strcmp(result, "true") == 0);
+    js_engine_free_string(result);
+
+    js_engine_shutdown(engine);
     PASS();
 }
 
@@ -716,8 +818,13 @@ TEST(load_all_with_test_game)
     JSEngine *engine = create_test_engine();
     ASSERT(engine != NULL);
 
+    ScriptLogCapture log_capture = {0};
+    script_loader_set_log_callback(capture_script_log, &log_capture);
     bool ok = script_loader_load_all(engine, "src/shims", game_dir);
+    script_loader_set_log_callback(NULL, NULL);
     ASSERT(ok);
+    ASSERT(log_capture.count > 0);
+    ASSERT(log_capture.saw_plugin);
 
     char *result;
 
@@ -1164,6 +1271,8 @@ int main(void)
     run_plugin_names_with_subfolders();
     run_load_order_without_plugins();
     run_load_order_with_plugins();
+    run_scene_profile_reports_transition_phases();
+    run_scene_profile_is_inactive_without_flag();
     run_load_order_shims_first();
 
     printf("\n-- Shim Loading --\n");

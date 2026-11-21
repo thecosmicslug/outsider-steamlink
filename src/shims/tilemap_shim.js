@@ -19,11 +19,40 @@
 
     /* ---- Tilemap.Layer override ---- */
 
+    var _tilesetBitmapTokens = new WeakMap();
+    var _nextTilesetBitmapToken = 1;
+
+    function _getTilesetBitmapToken(bitmaps) {
+        var token = _tilesetBitmapTokens.get(bitmaps);
+        if (!token) {
+            token = _nextTilesetBitmapToken++;
+            _tilesetBitmapTokens.set(bitmaps, token);
+        }
+        return token;
+    }
+
+    if (typeof Tilemap.Layer.prototype.clear === "function") {
+        var _layerClear = Tilemap.Layer.prototype.clear;
+        Tilemap.Layer.prototype.clear = function() {
+            this._nativeElementsDirty = true;
+            return _layerClear.apply(this, arguments);
+        };
+    }
+
+    if (typeof Tilemap.Layer.prototype.addRect === "function") {
+        var _layerAddRect = Tilemap.Layer.prototype.addRect;
+        Tilemap.Layer.prototype.addRect = function() {
+            this._nativeElementsDirty = true;
+            return _layerAddRect.apply(this, arguments);
+        };
+    }
+
     /* Caches per-setNumber {glTexture, width, height} for render. */
     Tilemap.Layer.prototype.setBitmaps = function(bitmaps) {
         this._images = bitmaps.map(function(bitmap) {
             return bitmap.image || bitmap.canvas;
         });
+        this._nativeTilesetToken = _getTilesetBitmapToken(bitmaps);
         this._tilesetTextures = [];
         this._needsTexturesUpdate = true;
         this._updateTilesetTextures();
@@ -78,10 +107,13 @@
        FilterControllerMZ moves this to Layer._render, which Container.render
        still calls, so the override survives. */
     Tilemap.Layer.prototype.render = function(renderer) {
+        this._nativeSubmittedElements = 0;
+        this._nativeVisibleElements = 0;
+        this._nativeDrawCalls = 0;
         if (!this.visible || this.worldAlpha <= 0) return;
 
-        var numElements = this._elements.length;
-        if (numElements === 0) return;
+        var sourceElementCount = this._elements.length;
+        if (sourceElementCount === 0) return;
 
         if (typeof __native_tilemap === "undefined" ||
             typeof __native_renderer === "undefined" ||
@@ -95,26 +127,43 @@
             this._needsTexturesUpdate = false;
         }
 
-        /* 7 floats per element. */
-        var bufSize = numElements * 7;
-        if (!this._nativeBuffer || this._nativeBuffer.length < bufSize) {
-            this._nativeBuffer = new Float32Array(bufSize * 2);
-        }
-        var buf = this._nativeBuffer;
-        var idx = 0;
-        for (var i = 0; i < numElements; i++) {
-            var item = this._elements[i];
-            buf[idx++] = item[0]; /* setNumber */
-            buf[idx++] = item[1]; /* sx */
-            buf[idx++] = item[2]; /* sy */
-            buf[idx++] = item[3]; /* dx */
-            buf[idx++] = item[4]; /* dy */
-            buf[idx++] = item[5]; /* w */
-            buf[idx++] = item[6]; /* h */
-        }
-
+        var wt = this.worldTransform;
+        var ox = wt ? wt.tx : 0;
+        var oy = wt ? wt.ty : 0;
         var ts = this._tilesetTextures || [];
         var numTs = ts.length;
+
+        if (!this._nativeBuffer || this._nativeElementsDirty ||
+            this._nativeElementsSource !== this._elements ||
+            this._nativeElementSourceCount !== sourceElementCount) {
+            var bufSize = sourceElementCount * 7;
+            if (!this._nativeBuffer || this._nativeBuffer.length < bufSize) {
+                this._nativeBuffer = new Float32Array(bufSize * 2);
+            }
+            var idx = 0;
+            var numElements = 0;
+            for (var i = 0; i < sourceElementCount; i++) {
+                var item = this._elements[i];
+                if (item[5] <= 0 || item[6] <= 0) continue;
+                this._nativeBuffer[idx++] = item[0];
+                this._nativeBuffer[idx++] = item[1];
+                this._nativeBuffer[idx++] = item[2];
+                this._nativeBuffer[idx++] = item[3];
+                this._nativeBuffer[idx++] = item[4];
+                this._nativeBuffer[idx++] = item[5];
+                this._nativeBuffer[idx++] = item[6];
+                numElements++;
+            }
+            this._nativeElementsSource = this._elements;
+            this._nativeElementSourceCount = sourceElementCount;
+            this._nativeElementCount = numElements;
+            this._nativeElementsDirty = false;
+        }
+        var buf = this._nativeBuffer;
+        var numElements = this._nativeElementCount;
+        this._nativeSubmittedElements = numElements;
+        if (numElements === 0) return;
+
         var texIds = [];
         var texWidths = [];
         var texHeights = [];
@@ -124,15 +173,15 @@
             texHeights.push(ts[j].height);
         }
 
-        var wt = this.worldTransform;
-        var ox = wt ? wt.tx : 0;
-        var oy = wt ? wt.ty : 0;
-
-        __native_tilemap.drawTiles(
+        var drawStats = __native_tilemap.drawTiles(
             buf.buffer, numElements,
             texIds, texWidths, texHeights, numTs,
-            ox, oy
+            ox, oy, this._nativeTilesetToken || 0
         );
+        if (drawStats) {
+            this._nativeVisibleElements = drawStats.visible | 0;
+            this._nativeDrawCalls = drawStats.drawCalls | 0;
+        }
     };
 
     /* ---- Tilemap.Renderer: no-op, the PIXI plugin path is bypassed ---- */

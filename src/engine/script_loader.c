@@ -7,9 +7,32 @@
 #include "io/file_io.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static LogCallback s_log_callback;
+static void *s_log_userdata;
+
+void script_loader_set_log_callback(LogCallback callback, void *userdata)
+{
+    s_log_callback = callback;
+    s_log_userdata = userdata;
+}
+
+static void script_loader_log(LogLevel level, const char *fmt, ...)
+{
+    char message[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    FILE *out = level >= LOG_WARN ? stderr : stdout;
+    fprintf(out, "%s\n", message);
+    if (s_log_callback) s_log_callback(level, message, s_log_userdata);
+}
 
 /* Reject plugin names containing path separators or traversal. */
 /* Plugin names are paths under js/plugins/ and may use subfolders
@@ -77,7 +100,8 @@ PluginList *script_loader_parse_plugins(const char *plugins_js_path)
     size_t file_size = 0;
     char *content = file_io_read_text(plugins_js_path, &file_size);
     if (!content) {
-        fprintf(stderr, "script_loader: failed to read plugins file: %s\n", plugins_js_path);
+        script_loader_log(LOG_ERROR, "script_loader: failed to read plugins file: %s",
+                          plugins_js_path);
         return NULL;
     }
 
@@ -267,7 +291,7 @@ bool script_loader_load_shims(JSEngine *engine, const char *shim_dir)
 
         bool ok = js_engine_eval_file(engine, path);
         if (!ok) {
-            fprintf(stderr, "script_loader: failed to load shim: %s\n", path);
+            script_loader_log(LOG_WARN, "script_loader: failed to load shim: %s", path);
             free(path);
             return false;
         }
@@ -292,6 +316,7 @@ static const char *RMMZ_CORE_SCRIPTS[] = {
    classes that depend on PIXI internals the runtime does not implement. */
 static const char *POST_CORE_SHIMS[] = {
     "tilemap_shim.js",
+    "scene_profile_shim.js",
     NULL
 };
 
@@ -323,7 +348,7 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
     if (!script_loader_load_shims(engine, shim_dir)) {
         return false;
     }
-    printf("script_loader: shims loaded\n");
+    script_loader_log(LOG_INFO, "script_loader: shims loaded");
 
     /* Step 2: Load library scripts (pako, etc.) */
     for (int i = 0; LIB_SCRIPTS[i] != NULL; i++) {
@@ -333,16 +358,16 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
         if (file_io_exists(path)) {
             bool ok = js_engine_eval_file(engine, path);
             if (!ok) {
-                fprintf(stderr, "script_loader: warning: failed to load lib: %s\n", path);
+                script_loader_log(LOG_WARN, "script_loader: failed to load lib: %s", path);
             }
             js_engine_execute_pending_jobs(engine);
             note_script_loaded(engine, LIB_SCRIPTS[i]);
         } else {
-            fprintf(stderr, "script_loader: warning: lib not found: %s\n", path);
+            script_loader_log(LOG_WARN, "script_loader: lib not found: %s", path);
         }
         free(path);
     }
-    printf("script_loader: libraries loaded\n");
+    script_loader_log(LOG_INFO, "script_loader: libraries loaded");
 
     /* Step 3: Load RPG Maker MZ core scripts */
     for (int i = 0; RMMZ_CORE_SCRIPTS[i] != NULL; i++) {
@@ -353,17 +378,18 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
             bool ok = js_engine_eval_file(engine, path);
             if (!ok) {
                 /* Non-fatal: core scripts may reference PIXI features the shim lacks. */
-                fprintf(stderr, "script_loader: note: errors during %s (may be expected for PIXI deps)\n",
-                        RMMZ_CORE_SCRIPTS[i]);
+                script_loader_log(LOG_WARN,
+                    "script_loader: errors during %s (may be expected for PIXI deps)",
+                    RMMZ_CORE_SCRIPTS[i]);
             }
             js_engine_execute_pending_jobs(engine);
             note_script_loaded(engine, RMMZ_CORE_SCRIPTS[i]);
         } else {
-            fprintf(stderr, "script_loader: warning: core script not found: %s\n", path);
+            script_loader_log(LOG_WARN, "script_loader: core script not found: %s", path);
         }
         free(path);
     }
-    printf("script_loader: core scripts loaded\n");
+    script_loader_log(LOG_INFO, "script_loader: core scripts loaded");
 
     /* Step 4: Load enabled plugins */
     char *plugins_path = join_path(game_dir, "js/plugins.js");
@@ -401,7 +427,7 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
 
                 const char *pname = plugins->entries[i].name;
                 if (!is_valid_plugin_name(pname)) {
-                    fprintf(stderr, "Skipping plugin with invalid name: %s\n", pname);
+                    script_loader_log(LOG_WARN, "Skipping plugin with invalid name: %s", pname);
                     continue;
                 }
 
@@ -446,22 +472,24 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
 
                     /* Logged before eval so a native crash inside a plugin
                        leaves its name as the last line of the log. */
-                    printf("script_loader: plugin %s\n", plugins->entries[i].name);
+                    script_loader_log(LOG_INFO, "script_loader: plugin %s",
+                                      plugins->entries[i].name);
                     bool ok = js_engine_eval_file(engine, path);
                     if (!ok) {
-                        fprintf(stderr, "script_loader: warning: plugin error: %s\n",
-                                plugins->entries[i].name);
+                        script_loader_log(LOG_WARN, "script_loader: plugin error: %s",
+                                          plugins->entries[i].name);
                     }
                     js_engine_execute_pending_jobs(engine);
 
                     js_engine_eval(engine, "__dom_setCurrentScript(null);",
                                    "<clear-current-script>");
                 } else {
-                    fprintf(stderr, "script_loader: warning: plugin not found: %s\n", path);
+                    script_loader_log(LOG_WARN, "script_loader: plugin not found: %s", path);
                 }
                 free(path);
             }
-            printf("script_loader: %zu plugins processed\n", plugins->count);
+            script_loader_log(LOG_INFO, "script_loader: %zu plugins processed",
+                              plugins->count);
             script_loader_free_plugins(plugins);
         }
     }
@@ -475,12 +503,13 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
 
         bool ok = js_engine_eval_file(engine, path);
         if (!ok) {
-            fprintf(stderr, "script_loader: warning: failed to load post-core shim: %s\n", path);
+            script_loader_log(LOG_WARN, "script_loader: failed to load post-core shim: %s",
+                              path);
         }
         js_engine_execute_pending_jobs(engine);
         free(path);
     }
-    printf("script_loader: post-core shims loaded\n");
+    script_loader_log(LOG_INFO, "script_loader: post-core shims loaded");
 
     /* Step 5: Load main.js */
     char *main_path = join_path(game_dir, "js/main.js");
@@ -489,12 +518,12 @@ bool script_loader_load_all(JSEngine *engine, const char *shim_dir, const char *
                        "<set-main-script>");
         bool ok = js_engine_eval_file(engine, main_path);
         if (!ok) {
-            fprintf(stderr, "script_loader: warning: errors during main.js\n");
+            script_loader_log(LOG_WARN, "script_loader: errors during main.js");
         }
         js_engine_execute_pending_jobs(engine);
         js_engine_eval(engine, "__dom_setCurrentScript(null);",
                        "<clear-main-script>");
-        printf("script_loader: main.js loaded\n");
+        script_loader_log(LOG_INFO, "script_loader: main.js loaded");
     }
     free(main_path);
 

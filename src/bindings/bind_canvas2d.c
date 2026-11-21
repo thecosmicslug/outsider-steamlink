@@ -336,8 +336,6 @@ static JSValue js_c2d_draw_image_handle(JSContext *ctx, JSValueConst this_val,
 
     ImageInfo info;
     if (!image_get_info(img_handle, &info)) return JS_UNDEFINED;
-    const uint8_t *pixels = image_get_pixels(img_handle);
-    if (!pixels) return JS_UNDEFINED;
 
     int sx, sy, sw, sh, dx, dy, dw, dh;
     if (JS_ToInt32(ctx, &sx, argv[2])) return JS_EXCEPTION;
@@ -349,8 +347,11 @@ static JSValue js_c2d_draw_image_handle(JSContext *ctx, JSValueConst this_val,
     if (JS_ToInt32(ctx, &dw, argv[8])) return JS_EXCEPTION;
     if (JS_ToInt32(ctx, &dh, argv[9])) return JS_EXCEPTION;
 
+    const uint8_t *pixels = image_get_pixels(img_handle);
+    if (!pixels) return JS_UNDEFINED;
     canvas2d_draw_image(handle, pixels, info.width, info.height,
                          sx, sy, sw, sh, dx, dy, dw, dh);
+    image_release_pixels(img_handle);
     return JS_UNDEFINED;
 }
 

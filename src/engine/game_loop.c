@@ -5,15 +5,25 @@
 
 #include "engine/game_loop.h"
 #include "engine/error_handler.h"
+#include "engine/boot_console.h"
 #include "audio/audio_engine.h"
+#include "rendering/filters.h"
 #include "rendering/renderer.h"
 #include "video/video_player.h"
+#ifdef RMMZ_STEAMLINK
+#include "rendering/sprite_batch.h"
+#include "rendering/tilemap.h"
+#endif
 
-#include <SDL3/SDL.h>
+#include "platform/sdl.h"
 #include <quickjs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef RMMZ_STEAMLINK
+#include <GLES2/gl2.h>
+#endif
 
 typedef struct ControlLine {
     char *text;
@@ -45,13 +55,15 @@ struct GameLoop {
     int        max_frames;
     int        total_frames;
     char      *screenshot_path;
-    Renderer **screenshot_renderer_slot;
+    Renderer **renderer_slot;
     char      *probe_expr;
 
     /* Periodic phase-time report every perf_interval frames (0 = off) */
     int           perf_interval;
     int           perf_count;
     GameLoopStats perf_acc;
+    bool          scene_perf_hooks;
+    bool          scene_render_perf_hook;
 
     /* Control mode (--control): commands read from stdin by a thread. */
     bool         control_enabled;
@@ -72,8 +84,32 @@ struct GameLoop {
     JSValue    js_updateGamepads;
     JSValue    js_flushTimers;
     JSValue    js_flushAnimationFrames;
+    JSValue    js_bootDisplayReady;
     bool       js_funcs_cached;
 };
+
+#ifdef RMMZ_STEAMLINK
+static void accumulate_sprite_profile_group(SpriteBatchProfileGroupStats *total,
+                                            const SpriteBatchProfileGroupStats *frame)
+{
+    total->wait_ms += frame->wait_ms;
+    total->batch_count += frame->batch_count;
+    if (frame->slowest_wait_ms <= total->slowest_wait_ms) return;
+    total->slowest_wait_ms = frame->slowest_wait_ms;
+    total->slowest_quads = frame->slowest_quads;
+    total->slowest_texture = frame->slowest_texture;
+    total->slowest_blend = frame->slowest_blend;
+    total->slowest_white_texture = frame->slowest_white_texture;
+    total->slowest_r = frame->slowest_r;
+    total->slowest_g = frame->slowest_g;
+    total->slowest_b = frame->slowest_b;
+    total->slowest_a = frame->slowest_a;
+    total->slowest_x = frame->slowest_x;
+    total->slowest_y = frame->slowest_y;
+    total->slowest_width = frame->slowest_width;
+    total->slowest_height = frame->slowest_height;
+}
+#endif
 
 static void control_shutdown(GameLoop *loop);
 
@@ -89,6 +125,26 @@ static void cache_js_functions(GameLoop *loop)
     loop->js_updateGamepads = JS_GetPropertyStr(ctx, loop->js_global, "__dom_updateGamepads");
     loop->js_flushTimers = JS_GetPropertyStr(ctx, loop->js_global, "__dom_flushTimers");
     loop->js_flushAnimationFrames = JS_GetPropertyStr(ctx, loop->js_global, "__dom_flushAnimationFrames");
+    static const char boot_ready_script[] =
+        "(function() {"
+        "  var sm = typeof SceneManager !== 'undefined' ? SceneManager : null;"
+        "  var scene = sm && sm._scene;"
+        "  if (!scene || typeof scene.isStarted !== 'function' || !scene.isStarted())"
+        "    return false;"
+        "  if (typeof Scene_Boot !== 'undefined' && scene instanceof Scene_Boot)"
+        "    return false;"
+        "  if (typeof Scene_Splash !== 'undefined' && scene instanceof Scene_Splash"
+        "      && !scene.isEnabled()) return false;"
+        "  return typeof scene.isFading !== 'function' || !scene.isFading();"
+        "})";
+    loop->js_bootDisplayReady = JS_Eval(ctx, boot_ready_script,
+                                        sizeof(boot_ready_script) - 1,
+                                        "<boot-display-ready>",
+                                        JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(loop->js_bootDisplayReady)) {
+        error_handler_report_js_exception(loop->engine, false);
+        loop->js_bootDisplayReady = JS_UNDEFINED;
+    }
     loop->js_funcs_cached = true;
 }
 
@@ -103,8 +159,34 @@ static void release_js_functions(GameLoop *loop)
     JS_FreeValue(ctx, loop->js_updateGamepads);
     JS_FreeValue(ctx, loop->js_flushInputEvents);
     JS_FreeValue(ctx, loop->js_setWindowSize);
+    JS_FreeValue(ctx, loop->js_bootDisplayReady);
     JS_FreeValue(ctx, loop->js_global);
     loop->js_funcs_cached = false;
+}
+
+static bool boot_display_ready(GameLoop *loop, JSContext *ctx)
+{
+    if (!JS_IsFunction(ctx, loop->js_bootDisplayReady)) return false;
+
+    JSValue result = JS_Call(ctx, loop->js_bootDisplayReady,
+                             loop->js_global, 0, NULL);
+    if (JS_IsException(result)) {
+        JS_FreeValue(ctx, result);
+        error_handler_report_js_exception(loop->engine, false);
+        JS_FreeValue(ctx, loop->js_bootDisplayReady);
+        loop->js_bootDisplayReady = JS_UNDEFINED;
+        return false;
+    }
+
+    int ready = JS_ToBool(ctx, result);
+    JS_FreeValue(ctx, result);
+    if (ready < 0) {
+        error_handler_report_js_exception(loop->engine, false);
+        JS_FreeValue(ctx, loop->js_bootDisplayReady);
+        loop->js_bootDisplayReady = JS_UNDEFINED;
+        return false;
+    }
+    return ready != 0;
 }
 
 GameLoop *game_loop_create(Platform *platform, JSEngine *engine, int target_fps)
@@ -134,8 +216,10 @@ GameLoop *game_loop_create(Platform *platform, JSEngine *engine, int target_fps)
     loop->js_updateGamepads = JS_UNDEFINED;
     loop->js_flushTimers = JS_UNDEFINED;
     loop->js_flushAnimationFrames = JS_UNDEFINED;
+    loop->js_bootDisplayReady = JS_UNDEFINED;
     loop->js_funcs_cached = false;
     loop->js_controlEval = JS_UNDEFINED;
+    boot_console_defer_updates();
 
     return loop;
 }
@@ -150,12 +234,198 @@ void game_loop_destroy(GameLoop *loop)
     free(loop);
 }
 
+static bool install_scene_perf_hooks(GameLoop *loop)
+{
+    static const char script[] =
+        "(function() {"
+        "  var sm = typeof SceneManager !== 'undefined' ? SceneManager : null;"
+        "  if (!sm) return 'SceneManager is not defined';"
+        "  if (typeof sm.updateScene !== 'function') return 'updateScene is not a function';"
+        "  var totals = { update: 0, render: 0, transform: 0, objects: 0,"
+        "    tilemap: 0, tileNative: 0, tileNativeCount: 0,"
+        "    tileElements: 0, tileSubmitted: 0, tileVisible: 0, tileDrawCalls: 0,"
+        "    sprites: 0, spriteCount: 0,"
+        "    tiling: 0, tilingCount: 0, graphics: 0, graphicsCount: 0,"
+        "    text: 0, textCount: 0 };"
+        "  function measure(target, name, timeKey, countKey, elements) {"
+        "    if (!target || typeof target[name] !== 'function') return;"
+        "    var original = target[name];"
+        "    target[name] = function() {"
+        "      var start = window.performance.now();"
+        "      if (countKey) totals[countKey]++;"
+        "      try {"
+        "        var result = original.apply(this, arguments);"
+        "        if (elements && this._elements) {"
+        "          totals.tileElements += this._elements.length;"
+        "          totals.tileSubmitted += this._nativeSubmittedElements || 0;"
+        "          totals.tileVisible += this._nativeVisibleElements || 0;"
+        "          totals.tileDrawCalls += this._nativeDrawCalls || 0;"
+        "        }"
+        "        return result;"
+        "      }"
+        "      finally { totals[timeKey] += window.performance.now() - start; }"
+        "    };"
+        "  }"
+        "  var renderRoots = new WeakSet();"
+        "  function instrumentRoot(root) {"
+        "    if (!root || renderRoots.has(root)) return;"
+        "    renderRoots.add(root);"
+        "    if (typeof root.updateTransform === 'function') {"
+        "      var update = root.updateTransform;"
+        "      root.updateTransform = function() {"
+        "        var start = window.performance.now();"
+        "        try { return update.apply(this, arguments); }"
+        "        finally { totals.transform += window.performance.now() - start; }"
+        "      };"
+        "    }"
+        "    if (typeof root.render === 'function') {"
+        "      var render = root.render;"
+        "      root.render = function() {"
+        "        var start = window.performance.now();"
+        "        try { return render.apply(this, arguments); }"
+        "        finally { totals.objects += window.performance.now() - start; }"
+        "      };"
+        "    }"
+        "  }"
+        "  function wrap(target, name, key, renderParts) {"
+        "    var original = target[name];"
+        "    target[name] = function() {"
+        "      if (renderParts) instrumentRoot(arguments[0]);"
+        "      var start = window.performance.now();"
+        "      try { return original.apply(this, arguments); }"
+        "      finally { totals[key] += window.performance.now() - start; }"
+        "    };"
+        "  }"
+        "  wrap(sm, 'updateScene', 'update', false);"
+        "  if (typeof Tilemap !== 'undefined' && Tilemap.Layer) {"
+        "    measure(Tilemap.Layer.prototype, 'render', 'tilemap', null, true);"
+        "  }"
+        "  if (typeof __native_tilemap !== 'undefined') {"
+        "    measure(__native_tilemap, 'drawTiles', 'tileNative', 'tileNativeCount', false);"
+        "  }"
+        "  if (typeof PIXI !== 'undefined') {"
+        "    if (globalThis.__outsiderPerfSkipSprites && PIXI.Sprite &&"
+        "        PIXI.Sprite.prototype) {"
+        "      PIXI.Sprite.prototype._renderSelf = function() {};"
+        "    }"
+        "    if (globalThis.__outsiderPerfSkipTiling && PIXI.TilingSprite &&"
+        "        PIXI.TilingSprite.prototype) {"
+        "      PIXI.TilingSprite.prototype.render = function() {};"
+        "    }"
+        "    if (PIXI.Sprite && PIXI.Sprite.prototype) {"
+        "      measure(PIXI.Sprite.prototype, '_renderSelf', 'sprites', 'spriteCount', false);"
+        "    }"
+        "    if (PIXI.TilingSprite && PIXI.TilingSprite.prototype) {"
+        "      measure(PIXI.TilingSprite.prototype, 'render', 'tiling', 'tilingCount', false);"
+        "    }"
+        "    if (PIXI.Graphics && PIXI.Graphics.prototype) {"
+        "      measure(PIXI.Graphics.prototype, 'render', 'graphics', 'graphicsCount', false);"
+        "    }"
+        "    if (PIXI.Text && PIXI.Text.prototype) {"
+        "      measure(PIXI.Text.prototype, 'render', 'text', 'textCount', false);"
+        "    }"
+        "  }"
+        "  var renderTarget = null, renderMethod = null, renderParts = false;"
+        "  if (typeof sm.renderScene === 'function') {"
+        "    renderTarget = sm; renderMethod = 'renderScene';"
+        "  } else if (typeof PIXI !== 'undefined' && PIXI.Renderer &&"
+        "             PIXI.Renderer.prototype &&"
+        "             typeof PIXI.Renderer.prototype.render === 'function') {"
+        "    renderTarget = PIXI.Renderer.prototype; renderMethod = 'render';"
+        "    renderParts = true;"
+        "  } else if (typeof Graphics !== 'undefined' &&"
+        "             typeof Graphics.render === 'function') {"
+        "    renderTarget = Graphics; renderMethod = 'render';"
+        "  }"
+        "  if (renderTarget) wrap(renderTarget, renderMethod, 'render', renderParts);"
+        "  globalThis.__outsiderScenePerf = totals;"
+        "  return renderMethod ? 'ok:' + renderMethod : 'ok:update-only';"
+        "})()";
+    char *result = js_engine_eval_string(loop->engine, script, "<perf-hooks>");
+    if (!result) {
+        error_handler_log(LOG_WARN, "Could not install SceneManager performance hooks");
+        return false;
+    }
+
+    bool installed = strncmp(result, "ok:", 3) == 0;
+    if (!installed) {
+        error_handler_log(LOG_WARN, "SceneManager performance hooks unavailable: %s", result);
+    } else {
+        loop->scene_render_perf_hook = strcmp(result, "ok:update-only") != 0;
+        if (!loop->scene_render_perf_hook) {
+            error_handler_log(LOG_WARN, "Scene render timing unavailable; collecting update timing only");
+        }
+    }
+    js_engine_free_string(result);
+    return installed;
+}
+
+static bool read_scene_perf_totals(GameLoop *loop, double *update_ms,
+                                   double *render_ms, double *transform_ms,
+                                   double *objects_ms, double *tilemap_ms,
+                                   double *tile_native_ms, double *tile_native_count,
+                                   double *tile_elements, double *tile_submitted,
+                                   double *tile_visible, double *tile_draw_calls,
+                                   double *sprite_ms,
+                                   double *sprite_count, double *tiling_ms,
+                                   double *tiling_count, double *graphics_ms,
+                                   double *graphics_count, double *text_ms,
+                                   double *text_count)
+{
+    static const char script[] =
+        "(function() {"
+        "  var p = globalThis.__outsiderScenePerf;"
+        "  if (!p) return 'unavailable';"
+        "  var result = p.update + ',' + p.render + ',' +"
+        "    p.transform + ',' + p.objects + ',' + p.tilemap + ',' +"
+        "    p.tileNative + ',' + p.tileNativeCount + ',' +"
+        "    p.tileElements + ',' + p.tileSubmitted + ',' +"
+        "    p.tileVisible + ',' + p.tileDrawCalls + ',' + p.sprites + ',' + p.spriteCount + ',' +"
+        "    p.tiling + ',' + p.tilingCount + ',' + p.graphics + ',' +"
+        "    p.graphicsCount + ',' + p.text + ',' + p.textCount;"
+        "  p.update = p.render = p.transform = p.objects = p.tilemap = 0;"
+        "  p.tileNative = p.tileNativeCount = 0;"
+        "  p.tileElements = p.tileSubmitted = p.tileVisible = p.tileDrawCalls = 0;"
+        "  p.sprites = p.spriteCount = p.tiling = 0;"
+        "  p.tilingCount = p.graphics = p.graphicsCount = p.text = 0;"
+        "  p.textCount = 0;"
+        "  return result;"
+        "})()";
+    char *result = js_engine_eval_string(loop->engine, script, "<perf-read>");
+    if (!result) {
+        error_handler_log(LOG_WARN, "Could not read SceneManager performance timings");
+        return false;
+    }
+
+    bool parsed = sscanf(result, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,"
+                         "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+                         update_ms, render_ms, transform_ms, objects_ms,
+                         tilemap_ms, tile_native_ms, tile_native_count,
+                         tile_elements, tile_submitted, tile_visible, tile_draw_calls,
+                         sprite_ms, sprite_count,
+                         tiling_ms, tiling_count, graphics_ms, graphics_count,
+                         text_ms, text_count) == 19;
+    js_engine_free_string(result);
+    if (!parsed) {
+        error_handler_log(LOG_WARN, "Invalid SceneManager performance timing result");
+    }
+    return parsed;
+}
+
 void game_loop_set_perf_report(GameLoop *loop, int every_frames)
 {
     if (!loop) return;
     loop->perf_interval = every_frames > 0 ? every_frames : 0;
+#ifdef RMMZ_STEAMLINK
+    tilemap_set_profile_gpu_sync(loop->perf_interval > 0);
+    sprite_batch_set_profile_gpu_sync(loop->perf_interval > 0);
+    filters_set_profile_gpu_sync(0);
+    filters_take_profile_gpu_stats(NULL, NULL);
+#endif
     loop->perf_count = 0;
     memset(&loop->perf_acc, 0, sizeof(loop->perf_acc));
+    loop->scene_perf_hooks = loop->perf_interval > 0 &&
+                             install_scene_perf_hooks(loop);
 }
 
 void game_loop_set_exit_probe(GameLoop *loop, const char *js_expression)
@@ -172,15 +442,20 @@ void game_loop_set_frame_limit(GameLoop *loop, int max_frames,
     loop->max_frames = max_frames > 0 ? max_frames : 0;
     free(loop->screenshot_path);
     loop->screenshot_path = screenshot_path ? strdup(screenshot_path) : NULL;
-    loop->screenshot_renderer_slot = renderer_slot;
+    loop->renderer_slot = renderer_slot;
+}
+
+void game_loop_set_renderer(GameLoop *loop, Renderer **renderer_slot)
+{
+    if (loop) loop->renderer_slot = renderer_slot;
 }
 
 /* Write the current default framebuffer as a binary PPM (RGB, top-down). */
 static bool write_screenshot(GameLoop *loop, const char *path)
 {
-    Renderer *r = loop->screenshot_renderer_slot ? *loop->screenshot_renderer_slot : NULL;
+    Renderer *r = loop->renderer_slot ? *loop->renderer_slot : NULL;
     int w = 0, h = 0;
-    platform_get_window_size(loop->platform, &w, &h);
+    platform_get_drawable_size(loop->platform, &w, &h);
     uint8_t *pixels = r ? renderer_read_pixels(r, 0, w, h) : NULL;
     if (!pixels) {
         error_handler_log(LOG_WARN, "Screenshot failed: no renderer or read-back failed");
@@ -310,7 +585,7 @@ bool game_loop_enable_control(GameLoop *loop, struct Renderer **renderer_slot)
         return false;
     }
 
-    loop->screenshot_renderer_slot = renderer_slot;
+    loop->renderer_slot = renderer_slot;
     loop->control_enabled = true;
     loop->control_thread = SDL_CreateThread(control_reader_thread, "control-stdin", loop);
     if (!loop->control_thread) {
@@ -536,6 +811,10 @@ bool game_loop_step(GameLoop *loop)
     /* --- Phase 4: requestAnimationFrame callbacks --- */
     phase_start = phase_end;
 
+#ifdef RMMZ_STEAMLINK
+    filters_set_profile_gpu_sync(loop->perf_interval > 0);
+#endif
+
     if (ctx && loop->js_funcs_cached) {
         if (JS_IsFunction(ctx, loop->js_flushAnimationFrames)) {
             double timestamp = game_loop_elapsed_ms(loop);
@@ -559,6 +838,20 @@ bool game_loop_step(GameLoop *loop)
         loop->prev_frame_start_ticks = frame_start;
         video_player_update(dt);
         video_player_draw();
+    }
+
+#ifdef RMMZ_STEAMLINK
+    filters_set_profile_gpu_sync(0);
+    unsigned int filter_draw_count = 0;
+    filters_take_profile_gpu_stats(&loop->stats.filter_gpu_wait_ms, &filter_draw_count);
+    loop->stats.filter_draw_count = (int)filter_draw_count;
+#endif
+
+    {
+        extern Renderer *s_renderer;
+        SpriteBatch *batch = renderer_get_batch(s_renderer);
+        loop->stats.draw_calls = sprite_batch_get_draw_calls(batch);
+        loop->stats.quad_count = sprite_batch_get_quad_count(batch);
     }
 
     phase_end = SDL_GetPerformanceCounter();
@@ -608,22 +901,60 @@ bool game_loop_step(GameLoop *loop)
     /* --- Phase 5: Present --- */
     phase_start = phase_end;
 
+#ifdef RMMZ_STEAMLINK
+    SpriteBatchProfileStats sprite_profile;
+    sprite_batch_take_profile_gpu_stats(&sprite_profile);
+    loop->stats.sprite_gpu_profile = sprite_profile;
+    loop->stats.scene_gpu_wait_ms = 0.0;
+    if (loop->perf_interval > 0) {
+        uint64_t finish_start = SDL_GetPerformanceCounter();
+        glFinish();
+        phase_end = SDL_GetPerformanceCounter();
+        loop->stats.scene_gpu_wait_ms = ticks_to_ms(loop, phase_end - finish_start);
+    }
+#endif
+    phase_start = SDL_GetPerformanceCounter();
+
     {
         /* The frame was drawn into an offscreen surface; putting it on screen
            is the renderer's job, and the window swap follows it. */
-        Renderer *r = loop->screenshot_renderer_slot ? *loop->screenshot_renderer_slot : NULL;
-        if (r) {
+        Renderer *r = loop->renderer_slot ? *loop->renderer_slot : NULL;
+        bool keep_boot_console = boot_console_is_active();
+        if (keep_boot_console && r && ctx && boot_display_ready(loop, ctx)) {
+            boot_console_hide();
+            keep_boot_console = false;
+        }
+        if (keep_boot_console) {
+            boot_console_present_pending();
+        } else if (r) {
             int ww = 0, wh = 0;
-            platform_get_window_size(loop->platform, &ww, &wh);
+            platform_get_drawable_size(loop->platform, &ww, &wh);
             renderer_set_output_size(r, ww, wh);
             renderer_present(r);
         }
     }
 
-    platform_swap_buffers(loop->platform);
+    phase_end = SDL_GetPerformanceCounter();
+    loop->stats.present_ms = ticks_to_ms(loop, phase_end - phase_start);
+
+#ifdef RMMZ_STEAMLINK
+    loop->stats.present_gpu_wait_ms = 0.0;
+    if (loop->perf_interval > 0) {
+        uint64_t finish_start = SDL_GetPerformanceCounter();
+        glFinish();
+        phase_end = SDL_GetPerformanceCounter();
+        loop->stats.present_gpu_wait_ms = ticks_to_ms(loop, phase_end - finish_start);
+    }
+#endif
+
+    uint64_t swap_start = SDL_GetPerformanceCounter();
+    /* Keep the already-presented boot log visible over empty startup frames. */
+    if (!boot_console_is_active()) {
+        platform_swap_buffers(loop->platform);
+    }
 
     phase_end = SDL_GetPerformanceCounter();
-    loop->stats.swap_ms = ticks_to_ms(loop, phase_end - phase_start);
+    loop->stats.swap_ms = ticks_to_ms(loop, phase_end - swap_start);
 
     loop->stats.total_ms = ticks_to_ms(loop, phase_end - frame_start);
 
@@ -633,17 +964,249 @@ bool game_loop_step(GameLoop *loop)
         loop->perf_acc.timers_ms += loop->stats.timers_ms;
         loop->perf_acc.jobs_ms   += loop->stats.jobs_ms;
         loop->perf_acc.raf_ms    += loop->stats.raf_ms;
+        loop->perf_acc.present_ms += loop->stats.present_ms;
+#ifdef RMMZ_STEAMLINK
+        accumulate_sprite_profile_group(
+            &loop->perf_acc.sprite_gpu_profile.sprites,
+            &loop->stats.sprite_gpu_profile.sprites);
+        accumulate_sprite_profile_group(
+            &loop->perf_acc.sprite_gpu_profile.premult_composites,
+            &loop->stats.sprite_gpu_profile.premult_composites);
+        loop->perf_acc.sprite_gpu_profile.blend_disabled_batches +=
+            loop->stats.sprite_gpu_profile.blend_disabled_batches;
+        loop->perf_acc.sprite_gpu_profile.full_screen_clear_batches +=
+            loop->stats.sprite_gpu_profile.full_screen_clear_batches;
+        loop->perf_acc.filter_gpu_wait_ms += loop->stats.filter_gpu_wait_ms;
+        loop->perf_acc.filter_draw_count += loop->stats.filter_draw_count;
+        loop->perf_acc.scene_gpu_wait_ms += loop->stats.scene_gpu_wait_ms;
+        loop->perf_acc.present_gpu_wait_ms += loop->stats.present_gpu_wait_ms;
+#endif
         loop->perf_acc.swap_ms   += loop->stats.swap_ms;
         loop->perf_acc.total_ms  += loop->stats.total_ms;
+        loop->perf_acc.draw_calls += loop->stats.draw_calls;
+        loop->perf_acc.quad_count += loop->stats.quad_count;
         if (++loop->perf_count >= loop->perf_interval) {
             double n = (double)loop->perf_count;
-            error_handler_log(LOG_INFO,
-                "perf: %d frames avg %.1f ms (events %.1f, timers %.1f, jobs %.1f, "
-                "rAF %.1f, swap %.1f)",
-                loop->perf_count, loop->perf_acc.total_ms / n,
-                loop->perf_acc.events_ms / n, loop->perf_acc.timers_ms / n,
-                loop->perf_acc.jobs_ms / n, loop->perf_acc.raf_ms / n,
-                loop->perf_acc.swap_ms / n);
+            if (loop->scene_perf_hooks) {
+                double update_ms, render_ms, transform_ms, objects_ms;
+                double tilemap_ms, tile_native_ms, tile_native_count;
+                double tile_elements, tile_submitted, tile_visible, tile_draw_calls;
+                double sprite_ms, sprite_count;
+                double tiling_ms, tiling_count, graphics_ms, graphics_count;
+                double text_ms, text_count;
+                if (read_scene_perf_totals(loop, &update_ms, &render_ms,
+                                           &transform_ms, &objects_ms,
+                                           &tilemap_ms, &tile_native_ms, &tile_native_count,
+                                           &tile_elements, &tile_submitted,
+                                           &tile_visible, &tile_draw_calls,
+                                           &sprite_ms, &sprite_count,
+                                           &tiling_ms, &tiling_count,
+                                           &graphics_ms, &graphics_count,
+                                           &text_ms, &text_count)) {
+                    if (loop->scene_render_perf_hook) {
+                        error_handler_log(LOG_INFO,
+                            "perf: %d frames avg %.1f ms (events %.1f, timers %.1f, jobs %.1f, "
+                            "rAF %.1f, scene update %.1f, scene render %.1f "
+                            "(transform %.1f, objects %.1f; tilemap %.1fms "
+#ifdef RMMZ_STEAMLINK
+                            "(native+GPU wait %.1fms/%.1f calls, %.0f->%.0f->%.0f el, "
+#else
+                            "(native %.1fms/%.1f calls, %.0f->%.0f->%.0f el, "
+#endif
+                            "%.1f draw calls), "
+                            "sprites %.1f/%.0f, tiling %.1f/%.0f, graphics %.1f/%.0f, "
+                            "text %.1f/%.0f), "
+#ifdef RMMZ_STEAMLINK
+                            "sprite GPU wait %.1f; regular %.1fms/%.1f batches, "
+                            "max %.1fms/%u quads tex=%u blend=%d bounds=%.0fx%.0f@%.0f,%.0f "
+                            "white=%d rgba=%.2f,%.2f,%.2f,%.2f; "
+                            "FBO composite %.1fms/%.1f batches, max %.1fms/%u quads "
+                            "tex=%u bounds=%.0fx%.0f@%.0f,%.0f; "
+                            "opaque no-blend %.1f/frame, fullscreen clears %.1f/frame, "
+                            "filter GPU wait %.1f/%.1f draws, "
+                            "scene GPU wait %.1f, "
+                            "present %.1f, present GPU wait %.1f, swap %.1f, "
+#else
+                            "present %.1f, swap %.1f, "
+#endif
+                            "draws %.1f, quads %.1f)",
+                            loop->perf_count, loop->perf_acc.total_ms / n,
+                            loop->perf_acc.events_ms / n, loop->perf_acc.timers_ms / n,
+                            loop->perf_acc.jobs_ms / n, loop->perf_acc.raf_ms / n,
+                            update_ms / n, render_ms / n, transform_ms / n,
+                            objects_ms / n, tilemap_ms / n, tile_native_ms / n,
+                            tile_native_count / n, tile_elements / n, tile_submitted / n,
+                            tile_visible / n, tile_draw_calls / n,
+                            sprite_ms / n, sprite_count / n, tiling_ms / n,
+                            tiling_count / n, graphics_ms / n, graphics_count / n,
+                            text_ms / n, text_count / n,
+#ifdef RMMZ_STEAMLINK
+                            (loop->perf_acc.sprite_gpu_profile.sprites.wait_ms +
+                             loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms) / n,
+                            loop->perf_acc.sprite_gpu_profile.sprites.wait_ms / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.sprites.batch_count / n,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_wait_ms,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_quads,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_texture,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_blend,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_width,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_height,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_x,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_y,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_white_texture ? 1 : 0,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_r,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_g,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_b,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_a,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.premult_composites.batch_count / n,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_wait_ms,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_quads,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_texture,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_width,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_height,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_x,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_y,
+                            (double)loop->perf_acc.sprite_gpu_profile.blend_disabled_batches / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.full_screen_clear_batches / n,
+                            loop->perf_acc.filter_gpu_wait_ms / n,
+                            (double)loop->perf_acc.filter_draw_count / n,
+                            loop->perf_acc.scene_gpu_wait_ms / n,
+#endif
+                            loop->perf_acc.present_ms / n,
+#ifdef RMMZ_STEAMLINK
+                            loop->perf_acc.present_gpu_wait_ms / n,
+#endif
+                            loop->perf_acc.swap_ms / n,
+                            (double)loop->perf_acc.draw_calls / n,
+                            (double)loop->perf_acc.quad_count / n);
+                    } else {
+                        error_handler_log(LOG_INFO,
+                            "perf: %d frames avg %.1f ms (events %.1f, timers %.1f, jobs %.1f, "
+                            "rAF %.1f, scene update %.1f, scene render n/a, "
+#ifdef RMMZ_STEAMLINK
+                            "sprite GPU wait %.1f; regular %.1fms/%.1f batches, "
+                            "max %.1fms/%u quads tex=%u blend=%d bounds=%.0fx%.0f@%.0f,%.0f "
+                            "white=%d rgba=%.2f,%.2f,%.2f,%.2f; "
+                            "FBO composite %.1fms/%.1f batches, max %.1fms/%u quads "
+                            "tex=%u bounds=%.0fx%.0f@%.0f,%.0f; "
+                            "opaque no-blend %.1f/frame, fullscreen clears %.1f/frame, "
+                            "filter GPU wait %.1f/%.1f draws, "
+                            "scene GPU wait %.1f, "
+                            "present %.1f, present GPU wait %.1f, swap %.1f, "
+#else
+                            "present %.1f, swap %.1f, "
+#endif
+                            "draws %.1f, quads %.1f)",
+                            loop->perf_count, loop->perf_acc.total_ms / n,
+                            loop->perf_acc.events_ms / n, loop->perf_acc.timers_ms / n,
+                            loop->perf_acc.jobs_ms / n, loop->perf_acc.raf_ms / n,
+                            update_ms / n,
+#ifdef RMMZ_STEAMLINK
+                            (loop->perf_acc.sprite_gpu_profile.sprites.wait_ms +
+                             loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms) / n,
+                            loop->perf_acc.sprite_gpu_profile.sprites.wait_ms / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.sprites.batch_count / n,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_wait_ms,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_quads,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_texture,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_blend,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_width,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_height,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_x,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_y,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_white_texture ? 1 : 0,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_r,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_g,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_b,
+                            loop->perf_acc.sprite_gpu_profile.sprites.slowest_a,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.premult_composites.batch_count / n,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_wait_ms,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_quads,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_texture,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_width,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_height,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_x,
+                            loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_y,
+                            (double)loop->perf_acc.sprite_gpu_profile.blend_disabled_batches / n,
+                            (double)loop->perf_acc.sprite_gpu_profile.full_screen_clear_batches / n,
+                            loop->perf_acc.filter_gpu_wait_ms / n,
+                            (double)loop->perf_acc.filter_draw_count / n,
+                            loop->perf_acc.scene_gpu_wait_ms / n,
+#endif
+                            loop->perf_acc.present_ms / n,
+#ifdef RMMZ_STEAMLINK
+                            loop->perf_acc.present_gpu_wait_ms / n,
+#endif
+                            loop->perf_acc.swap_ms / n,
+                            (double)loop->perf_acc.draw_calls / n,
+                            (double)loop->perf_acc.quad_count / n);
+                    }
+                } else {
+                    loop->scene_perf_hooks = false;
+                }
+            } else {
+                error_handler_log(LOG_INFO,
+                    "perf: %d frames avg %.1f ms (events %.1f, timers %.1f, jobs %.1f, "
+                    "rAF %.1f, "
+#ifdef RMMZ_STEAMLINK
+                    "sprite GPU wait %.1f; regular %.1fms/%.1f batches, "
+                    "max %.1fms/%u quads tex=%u blend=%d bounds=%.0fx%.0f@%.0f,%.0f "
+                    "white=%d rgba=%.2f,%.2f,%.2f,%.2f; "
+                    "FBO composite %.1fms/%.1f batches, max %.1fms/%u quads "
+                    "tex=%u bounds=%.0fx%.0f@%.0f,%.0f; "
+                    "opaque no-blend %.1f/frame, fullscreen clears %.1f/frame, "
+                    "filter GPU wait %.1f/%.1f draws, "
+                    "scene GPU wait %.1f, "
+                    "present %.1f, present GPU wait %.1f, swap %.1f, "
+#else
+                    "present %.1f, swap %.1f, "
+#endif
+                    "draws %.1f, quads %.1f)",
+                    loop->perf_count, loop->perf_acc.total_ms / n,
+                    loop->perf_acc.events_ms / n, loop->perf_acc.timers_ms / n,
+                    loop->perf_acc.jobs_ms / n, loop->perf_acc.raf_ms / n,
+#ifdef RMMZ_STEAMLINK
+                    (loop->perf_acc.sprite_gpu_profile.sprites.wait_ms +
+                     loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms) / n,
+                    loop->perf_acc.sprite_gpu_profile.sprites.wait_ms / n,
+                    (double)loop->perf_acc.sprite_gpu_profile.sprites.batch_count / n,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_wait_ms,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_quads,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_texture,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_blend,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_width,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_height,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_x,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_y,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_white_texture ? 1 : 0,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_r,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_g,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_b,
+                    loop->perf_acc.sprite_gpu_profile.sprites.slowest_a,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.wait_ms / n,
+                    (double)loop->perf_acc.sprite_gpu_profile.premult_composites.batch_count / n,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_wait_ms,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_quads,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_texture,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_width,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_height,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_x,
+                    loop->perf_acc.sprite_gpu_profile.premult_composites.slowest_y,
+                    (double)loop->perf_acc.sprite_gpu_profile.blend_disabled_batches / n,
+                    (double)loop->perf_acc.sprite_gpu_profile.full_screen_clear_batches / n,
+                    loop->perf_acc.filter_gpu_wait_ms / n,
+                    (double)loop->perf_acc.filter_draw_count / n,
+                    loop->perf_acc.scene_gpu_wait_ms / n, loop->perf_acc.present_ms / n,
+                    loop->perf_acc.present_gpu_wait_ms / n,
+#else
+                    loop->perf_acc.present_ms / n,
+#endif
+                    loop->perf_acc.swap_ms / n,
+                    (double)loop->perf_acc.draw_calls / n,
+                    (double)loop->perf_acc.quad_count / n);
+            }
             memset(&loop->perf_acc, 0, sizeof(loop->perf_acc));
             loop->perf_count = 0;
         }

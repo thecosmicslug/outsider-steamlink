@@ -90,7 +90,7 @@ TEST(test_tilemap_draw_tiles_normal)
     float elements[7] = {0, 0, 0, 10, 20, 48, 48};
 
     /* Headless: sprite_batch_draw only accumulates quads; verify no crash. */
-    tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb), 1);
 
     sprite_batch_destroy(sb);
 }
@@ -108,7 +108,8 @@ TEST(test_tilemap_draw_tiles_with_offset)
 
     float elements[7] = {0, 0, 0, 10, 20, 48, 48};
 
-    tilemap_draw_tiles(elements, 1, tilesets, 1, -100.0f, -50.0f, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, tilesets, 1,
+                                     -100.0f, -50.0f, sb), 0);
 
     sprite_batch_destroy(sb);
 }
@@ -122,7 +123,7 @@ TEST(test_tilemap_draw_tiles_shadow)
     float elements[7] = {-1, 0, 0, 10, 20, 24, 24};
 
     /* No tilesets needed for shadow — they use the white texture. */
-    tilemap_draw_tiles(elements, 1, NULL, 0, 0, 0, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, NULL, 0, 0, 0, sb), 1);
 
     sprite_batch_destroy(sb);
 }
@@ -140,7 +141,7 @@ TEST(test_tilemap_draw_tiles_invalid_set)
 
     /* setNumber 5 — out of range for 1 tileset. Should skip gracefully. */
     float elements[7] = {5, 0, 0, 10, 20, 48, 48};
-    tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb), 0);
 
     sprite_batch_destroy(sb);
 }
@@ -158,7 +159,7 @@ TEST(test_tilemap_draw_tiles_missing_texture)
     }};
 
     float elements[7] = {0, 0, 0, 10, 20, 48, 48};
-    tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb), 0);
 
     sprite_batch_destroy(sb);
 }
@@ -199,7 +200,7 @@ TEST(test_tilemap_draw_tiles_zero_size)
 
     /* Zero-size tile should be skipped. */
     float elements[7] = {0, 0, 0, 10, 20, 0, 0};
-    tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb);
+    ASSERT_EQ_INT(tilemap_draw_tiles(elements, 1, tilesets, 1, 0, 0, sb), 0);
 
     sprite_batch_destroy(sb);
 }
@@ -247,11 +248,11 @@ TEST(test_js_tilemap_draw_tiles_basic)
     ASSERT(js_eval_bool(
         "__native_renderer.init(816, 624);"
         "var buf = new Float32Array([0, 0, 0, 10, 20, 48, 48]);"
-        "var texIds = [0];"
+        "var texIds = [1];"
         "var texW = [256];"
         "var texH = [256];"
-        "__native_tilemap.drawTiles(buf.buffer, 1, texIds, texW, texH, 1, 0, 0);"
-        "true;"
+        "var stats = __native_tilemap.drawTiles(buf.buffer, 1, texIds, texW, texH, 1, 0, 0, 1);"
+        "stats.visible === 1 && stats.drawCalls >= 0;"
     ));
     js_teardown();
 }
@@ -262,8 +263,8 @@ TEST(test_js_tilemap_draw_tiles_shadow)
     ASSERT(js_eval_bool(
         "__native_renderer.init(816, 624);"
         "var buf = new Float32Array([-1, 0, 0, 10, 20, 24, 24]);"
-        "__native_tilemap.drawTiles(buf.buffer, 1, [], [], [], 0, 0, 0);"
-        "true;"
+        "var stats = __native_tilemap.drawTiles(buf.buffer, 1, [], [], [], 0, 0, 0, 1);"
+        "stats.visible === 1 && stats.drawCalls >= 0;"
     ));
     js_teardown();
 }
@@ -274,7 +275,7 @@ TEST(test_js_tilemap_draw_tiles_with_offset)
     ASSERT(js_eval_bool(
         "__native_renderer.init(816, 624);"
         "var buf = new Float32Array([0, 0, 0, 10, 20, 48, 48]);"
-        "__native_tilemap.drawTiles(buf.buffer, 1, [0], [256], [256], 1, -100.5, -50.5);"
+        "__native_tilemap.drawTiles(buf.buffer, 1, [0], [256], [256], 1, -100.5, -50.5, 1);"
         "true;"
     ));
     js_teardown();
@@ -286,7 +287,7 @@ TEST(test_js_tilemap_draw_tiles_empty)
     ASSERT(js_eval_bool(
         "__native_renderer.init(816, 624);"
         "var buf = new Float32Array(0);"
-        "__native_tilemap.drawTiles(buf.buffer, 0, [], [], [], 0, 0, 0);"
+        "__native_tilemap.drawTiles(buf.buffer, 0, [], [], [], 0, 0, 0, 1);"
         "true;"
     ));
     js_teardown();
@@ -523,11 +524,83 @@ TEST(test_tilemap_layer_simulation)
     ASSERT(js_eval_bool(
         "/* Test native draw call (shadow tiles still work with no tilesets) */\n"
         "var shadowBuf = new Float32Array([-1, 0, 0, 10, 20, 24, 24]);\n"
-        "__native_tilemap.drawTiles(shadowBuf.buffer, 1, [], [], [], 0, 0, 0);\n"
+        "__native_tilemap.drawTiles(shadowBuf.buffer, 1, [], [], [], 0, 0, 0, 1);\n"
         "__native_renderer._active = false;\n"
         "true;\n"
     ));
 
+    js_teardown();
+}
+
+TEST(test_tilemap_layer_caches_elements_and_native_culls)
+{
+    js_setup_with_shims();
+    ASSERT(js_eval_bool(
+        "globalThis.Tilemap = function() {};"
+        "Tilemap.Layer = function() { PIXI.Container.call(this); };"
+        "Tilemap.Layer.prototype = Object.create(PIXI.Container.prototype);"
+        "Tilemap.Layer.prototype.constructor = Tilemap.Layer;"
+        "Tilemap.Layer.prototype.clear = function() { this._elements.length = 0; };"
+        "Tilemap.Layer.prototype.addRect = function(s,sx,sy,dx,dy,w,h) {"
+        "  this._elements.push([s,sx,sy,dx,dy,w,h]);"
+        "};"
+        "Tilemap.Renderer = function() {};"
+        "true;"
+    ));
+    ASSERT(js_engine_eval_file(_js, "src/shims/tilemap_shim.js"));
+    ASSERT(js_eval_bool(
+        "__native_renderer.init(816, 624);"
+        "__native_renderer._active = true;"
+        "var layer = new Tilemap.Layer();"
+        "layer._elements = ["
+        "  [-1, 0, 0, 10, 10, 24, 24],"
+        "  [-1, 0, 0, -40, 10, 24, 24],"
+        "  [-1, 0, 0, -10, 10, 24, 24],"
+        "  [-1, 0, 0, 811, 10, 24, 24],"
+        "  [-1, 0, 0, 820, 10, 24, 24],"
+        "  [-1, 0, 0, 900, 10, 24, 24],"
+        "  [-1, 0, 0, 10, 630, 24, 24],"
+        "  [-1, 0, 0, 10, 10, 0, 24],"
+        "  [2, 0, 0, 10, 10, 24, 24]"
+        "];"
+        "layer._tilesetTextures = [{glTexture: 1, width: 256, height: 256}];"
+        "layer._needsTexturesUpdate = false;"
+        "layer._hasMissingTextures = false;"
+        "layer.visible = true;"
+        "layer.worldAlpha = 1;"
+        "layer.transform.worldTransform.tx = 5;"
+        "var nativeDrawTiles = __native_tilemap.drawTiles;"
+        "var submittedCount = -1;"
+        "var submittedX = [];"
+        "__native_tilemap.drawTiles = function(buffer, count, ids, widths, heights, n, x, y, token) {"
+        "  submittedCount = count;"
+        "  submittedX = [];"
+        "  var data = new Float32Array(buffer);"
+        "  for (var i = 0; i < count; i++) submittedX.push(data[i * 7 + 3]);"
+        "  return nativeDrawTiles(buffer, count, ids, widths, heights, n, x, y, token);"
+        "};"
+        "layer.render({screen: {width: 2048, height: 2048}});"
+        "var packedBuffer = layer._nativeBuffer;"
+        "var initialSubmittedCount = submittedCount;"
+        "var initialSubmittedX = submittedX.join(',');"
+        "var firstVisible = layer._nativeVisibleElements;"
+        "layer.transform.worldTransform.tx = 6;"
+        "layer.render({screen: {width: 2048, height: 2048}});"
+        "var reusedBuffer = packedBuffer === layer._nativeBuffer;"
+        "layer.addRect(-1, 0, 0, 100, 10, 24, 24);"
+        "layer.render({screen: {width: 2048, height: 2048}});"
+        "var addRectInvalidated = submittedCount === 9 && submittedX[8] === 100;"
+        "layer.clear();"
+        "layer.addRect(-1, 0, 0, 20, 20, 24, 24);"
+        "layer.render({screen: {width: 2048, height: 2048}});"
+        "var clearInvalidated = submittedCount === 1 && submittedX[0] === 20;"
+        "true;"
+    ));
+    ASSERT(js_eval_bool(
+        "initialSubmittedCount === 8 && "
+        "initialSubmittedX === '10,-40,-10,811,820,900,10,10' && "
+        "reusedBuffer && addRectInvalidated && clearInvalidated && firstVisible === 3;"
+    ));
     js_teardown();
 }
 
@@ -601,6 +674,7 @@ int main(void)
 
     printf("\n--- Tilemap integration tests ---\n");
     RUN(test_tilemap_layer_simulation);
+    RUN(test_tilemap_layer_caches_elements_and_native_culls);
     RUN(test_tilemap_combined_layer_pattern);
 
     printf("\n=== Results: %d/%d passed ===\n", _tests_passed, _tests_run);

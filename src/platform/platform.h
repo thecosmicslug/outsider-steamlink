@@ -25,8 +25,15 @@ bool platform_poll_events(Platform *p);
 /* Swap the back buffer to the screen. */
 void platform_swap_buffers(Platform *p);
 
+/* Enable or disable swap interval synchronization when supported. */
+void platform_set_swap_interval(Platform *p, bool enabled);
+
 /* Query the current window dimensions. */
 void platform_get_window_size(Platform *p, int *w, int *h);
+
+/* Query the drawable dimensions in pixels. GPU rendering backends that
+   manage their own logical output may return the window dimensions instead. */
+void platform_get_drawable_size(Platform *p, int *w, int *h);
 
 /* Set the window title. */
 void platform_set_window_title(Platform *p, const char *title);

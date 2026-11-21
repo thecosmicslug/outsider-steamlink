@@ -92,6 +92,13 @@ static JSValue js_renderer_get_size(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
+static JSValue js_renderer_get_render_scale(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    return JS_NewFloat64(ctx, renderer_get_render_scale());
+}
+
 /* Frame management */
 
 /* beginFrame() */
@@ -111,6 +118,16 @@ static JSValue js_renderer_begin_frame_transparent(JSContext *ctx, JSValueConst 
     if (s_renderer) renderer_begin_frame_transparent(s_renderer);
     return JS_UNDEFINED;
 }
+
+#ifdef RMMZ_GLES2
+static JSValue js_renderer_begin_frame_no_clear(JSContext *ctx, JSValueConst this_val,
+                                                 int argc, JSValueConst *argv)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    if (s_renderer) renderer_begin_frame_no_clear(s_renderer);
+    return JS_UNDEFINED;
+}
+#endif
 
 /* endFrame() */
 static JSValue js_renderer_end_frame(JSContext *ctx, JSValueConst this_val,
@@ -284,6 +301,47 @@ static JSValue js_renderer_draw_quad(JSContext *ctx, JSValueConst this_val,
                           (float)x, (float)y, (float)w, (float)h,
                           (float)u0, (float)v0, (float)u1, (float)v1,
                           tint, (float)alpha);
+    }
+    return JS_UNDEFINED;
+}
+
+/* drawQuads(texture, quadsF32, count, tint, alpha); each quad has 8 floats:
+   x, y, w, h, u0, v0, u1, v1. */
+static JSValue js_renderer_draw_quads(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    if (argc < 5)
+        return JS_ThrowTypeError(ctx, "drawQuads requires texture, buffer, count, tint, alpha");
+    if (!s_renderer) return JS_UNDEFINED;
+
+    uint32_t texture, tint;
+    int count;
+    double alpha;
+    if (JS_ToUint32(ctx, &texture, argv[0])) return JS_EXCEPTION;
+    if (JS_ToInt32(ctx, &count, argv[2])) return JS_EXCEPTION;
+    if (JS_ToUint32(ctx, &tint, argv[3])) return JS_EXCEPTION;
+    if (JS_ToFloat64(ctx, &alpha, argv[4])) return JS_EXCEPTION;
+    if (count < 0)
+        return JS_ThrowRangeError(ctx, "drawQuads: count must be non-negative");
+
+    size_t buffer_len = 0;
+    uint8_t *buffer = JS_GetArrayBuffer(ctx, &buffer_len, argv[1]);
+    if (!buffer)
+        return JS_ThrowTypeError(ctx, "drawQuads: buffer must be an ArrayBuffer");
+    if ((size_t)count > buffer_len / (8 * sizeof(float)))
+        return JS_ThrowRangeError(ctx, "drawQuads: buffer too small for %d quads", count);
+
+    SpriteBatch *batch = renderer_get_batch(s_renderer);
+    if (batch) {
+        const float *quads = (const float *)buffer;
+        for (int i = 0; i < count; i++) {
+            const float *q = quads + (size_t)i * 8;
+            sprite_batch_draw(batch, texture,
+                              q[0], q[1], q[2], q[3],
+                              q[4], q[5], q[6], q[7],
+                              tint, (float)alpha);
+        }
     }
     return JS_UNDEFINED;
 }
@@ -520,8 +578,12 @@ static const JSCFunctionListEntry js_renderer_funcs[] = {
     JS_CFUNC_DEF("shutdown",            0, js_renderer_shutdown),
     JS_CFUNC_DEF("resize",              2, js_renderer_resize),
     JS_CFUNC_DEF("getSize",             0, js_renderer_get_size),
+    JS_CFUNC_DEF("getRenderScale",      0, js_renderer_get_render_scale),
     JS_CFUNC_DEF("beginFrame",          0, js_renderer_begin_frame),
     JS_CFUNC_DEF("beginFrameTransparent", 0, js_renderer_begin_frame_transparent),
+#ifdef RMMZ_GLES2
+    JS_CFUNC_DEF("beginFrameNoClear",   0, js_renderer_begin_frame_no_clear),
+#endif
     JS_CFUNC_DEF("endFrame",            0, js_renderer_end_frame),
     JS_CFUNC_DEF("createTexture",       2, js_renderer_create_texture),
     JS_CFUNC_DEF("updateTexture",       4, js_renderer_update_texture),
@@ -532,6 +594,7 @@ static const JSCFunctionListEntry js_renderer_funcs[] = {
     JS_CFUNC_DEF("bindRenderTexture",   3, js_renderer_bind_rt),
     JS_CFUNC_DEF("unbindRenderTexture", 0, js_renderer_unbind_rt),
     JS_CFUNC_DEF("drawQuad",           11, js_renderer_draw_quad),
+    JS_CFUNC_DEF("drawQuads",           5, js_renderer_draw_quads),
     JS_CFUNC_DEF("drawQuadVertices",   15, js_renderer_draw_quad_verts),
     JS_CFUNC_DEF("drawQuadVerticesUV", 19, js_renderer_draw_quad_verts_uv),
     JS_CFUNC_DEF("flush",               0, js_renderer_flush),

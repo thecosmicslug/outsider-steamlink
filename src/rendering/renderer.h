@@ -15,6 +15,11 @@
    framebuffer objects for render-to-texture. */
 typedef struct Renderer Renderer;
 
+/* Set the internal raster scale before creating the renderer. Logical
+   coordinates and window dimensions remain unchanged. */
+bool renderer_set_render_scale(float scale);
+float renderer_get_render_scale(void);
+
 /* Create the renderer with the given viewport dimensions. */
 Renderer *renderer_create(int width, int height);
 
@@ -36,6 +41,9 @@ void renderer_begin_frame(Renderer *r);
 
 /* Begin a frame clearing to transparent black (for FBO rendering). */
 void renderer_begin_frame_transparent(Renderer *r);
+#ifdef RMMZ_GLES2
+void renderer_begin_frame_no_clear(Renderer *r);
+#endif
 
 /* End the current frame. Flushes the sprite batch. */
 void renderer_end_frame(Renderer *r);

@@ -94,9 +94,9 @@ float4 main(Input input) : SV_Target
     float b3 = blendColor.b / 255.0;
     float i3 = blendColor.a / 255.0;
     float i1 = 1.0 - i3;
-    r = clamp((r / a + r2) * a, 0.0, 1.0);
-    g = clamp((g / a + g2) * a, 0.0, 1.0);
-    b = clamp((b / a + b2) * a, 0.0, 1.0);
+    r = clamp(r + r2 * a, 0.0, 1.0);
+    g = clamp(g + g2 * a, 0.0, 1.0);
+    b = clamp(b + b2 * a, 0.0, 1.0);
     r = clamp(r * i1 + r3 * i3 * a, 0.0, 1.0);
     g = clamp(g * i1 + g3 * i3 * a, 0.0, 1.0);
     b = clamp(b * i1 + b3 * i3 * a, 0.0, 1.0);

@@ -26,6 +26,16 @@ struct Renderer {
     int          bound_w, bound_h;   /* dimensions of the bound render target */
 };
 
+bool renderer_set_render_scale(float scale)
+{
+    return scale == 1.0f;
+}
+
+float renderer_get_render_scale(void)
+{
+    return 1.0f;
+}
+
 Renderer *renderer_create(int width, int height)
 {
     Renderer *r = calloc(1, sizeof(Renderer));

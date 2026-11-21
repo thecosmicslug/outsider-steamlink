@@ -30,6 +30,10 @@ void filter_delete_shader(uint32_t program);
 /* Begin filter rendering: bind shader, set input texture, resolution.
    Must call filter_end() when done. */
 void filter_begin(uint32_t program, uint32_t input_texture, int width, int height);
+#ifdef RMMZ_GLES2
+void filter_begin_overwrite(uint32_t program, uint32_t input_texture,
+                            int width, int height);
+#endif
 
 /* Set a float uniform on the currently bound filter shader. */
 void filter_set_uniform_1f(uint32_t program, const char *name, float value);
@@ -51,6 +55,12 @@ void filter_set_uniform_mat4(uint32_t program, const char *name, const float *va
 /* Draw the fullscreen quad with the current shader. */
 void filter_draw_quad(void);
 
+#ifdef RMMZ_STEAMLINK
+/* Diagnostic-only GPU synchronization around filter quad draws. */
+void filters_set_profile_gpu_sync(int enabled);
+void filters_take_profile_gpu_stats(double *wait_ms, unsigned int *draw_count);
+#endif
+
 /* End filter rendering: unbinds shader and VAO. */
 void filter_end(void);
 
@@ -61,5 +71,6 @@ const char *filter_blur_frag_src(void);
 const char *filter_alpha_frag_src(void);
 const char *filter_color_filter_frag_src(void);
 const char *filter_mask_frag_src(void);
+const char *filter_copy_frag_src(void);
 
 #endif /* RMMZ_FILTERS_H */

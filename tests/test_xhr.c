@@ -65,6 +65,12 @@ static void setup_test_data(void)
     uint8_t bin[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
     file_io_write_binary(test_tmp_path("rmmz_test_xhr/test.bin"), bin, sizeof(bin));
 
+    file_io_mkdir(test_tmp_path("rmmz_test_xhr/audio"));
+    file_io_mkdir(test_tmp_path("rmmz_test_xhr/audio/bgm"));
+    uint8_t audio[] = {0x4F, 0x67, 0x67, 0x53};
+    file_io_write_binary(test_tmp_path("rmmz_test_xhr/audio/bgm/test.ogg"),
+                         audio, sizeof(audio));
+
     file_io_write_text(test_tmp_path("rmmz_test_xhr/hello.txt"), "Hello, World!");
 }
 
@@ -292,6 +298,44 @@ static void test_xhr_sync_binary(void)
         "x.send();\n"
         "x.response instanceof ArrayBuffer ? 'yes' : 'no'", "test");
     if (r && strcmp(r, "yes") == 0) { PASS(); } else { FAIL(r ? r : "NULL"); }
+    js_engine_free_string(r);
+
+    destroy_test_ctx(tc);
+}
+
+static void test_xhr_no_audio(void)
+{
+    TestCtx *tc = create_test_ctx();
+    if (!tc) { TEST(xhr_setup); FAIL("engine setup"); return; }
+
+    TEST(xhr_no_audio_skips_binary_file_read);
+    char *r = js_engine_eval_string(tc->engine,
+        "globalThis.__outsiderNoAudio = true;\n"
+        "var originalRead = __native_io.readFileBinary;\n"
+        "var readCount = 0;\n"
+        "__native_io.readFileBinary = function(path) {\n"
+        "    readCount++;\n"
+        "    return originalRead(path);\n"
+        "};\n"
+        "var x = new XMLHttpRequest();\n"
+        "x.open('GET', 'audio/bgm/test.ogg', false);\n"
+        "x.responseType = 'arraybuffer';\n"
+        "x.send();\n"
+        "x.status + '|' + x.response.byteLength + '|' + readCount",
+        "test");
+    if (r && strcmp(r, "200|0|0") == 0) { PASS(); } else { FAIL(r ? r : "NULL"); }
+    js_engine_free_string(r);
+
+    TEST(xhr_normal_audio_request_still_reads_file);
+    r = js_engine_eval_string(tc->engine,
+        "globalThis.__outsiderNoAudio = false;\n"
+        "var x = new XMLHttpRequest();\n"
+        "x.open('GET', 'audio/bgm/test.ogg', false);\n"
+        "x.responseType = 'arraybuffer';\n"
+        "x.send();\n"
+        "x.status + '|' + x.response.byteLength + '|' + readCount",
+        "test");
+    if (r && strcmp(r, "200|4|1") == 0) { PASS(); } else { FAIL(r ? r : "NULL"); }
     js_engine_free_string(r);
 
     destroy_test_ctx(tc);
@@ -596,6 +640,9 @@ int main(void)
 
     printf("\n-- Sync Binary Loading --\n");
     test_xhr_sync_binary();
+
+    printf("\n-- Disabled Audio --\n");
+    test_xhr_no_audio();
 
     printf("\n-- Async Loading --\n");
     test_xhr_async();
